@@ -1,0 +1,483 @@
+This script analyses outputs from Diffbind and EdgeR, produces PCA plot to show relations between patients, performs correlation analysis between gene expression and accessibility at enhancers for chosen genes and makes initial k-means analysis
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Reading in the data 
+genes_enhancers <- read_tsv("~/MM_thesis_repo/general_data/J_28_final_enhancer_gene_assignment.txt")
+RNAseq_data <- read_excel("~/MM_thesis_repo/general_data/RNAseq_salmon_TPM_all_files_overview_NC.xlsx")
+diffbind_results <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_all_with_peakID.txt")
+diffbind_annot <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_all_tag_annot.txt")
+edger_results <- read_tsv("~/MM_thesis_repo/patient_data/MA_14_MM_ND_RNA_cpm.txt")
+enhancers_full_data <- read_tsv("~/MM_thesis_repo/general_data/MA16_Enhancers_final_final.txt") %>%
+  rename(ND_A28c.14 = "ND_A28.c15") %>%
+  rename(ND_A26.20 = "ND_A28c.7") 
+essential_genes <- read_excel("~/MM_thesis_repo/general_data/MM_essential_genes.xlsx", col_names = FALSE) %>%
+  set_names("geneid")
+```
+
+Tidying up the data 
+```{r}
+edger <- edger_results %>%
+  select(1,2,6) %>%
+   mutate(differential_gene = case_when(
+   FDR < 0.05 & logFC > 0 ~ "downregulated", 
+   FDR < 0.05 & logFC < 0 ~ "upregulated",
+   .default = "no change"))  
+
+upregulated_genes <- edger %>%
+  filter(differential_gene == "upregulated")
+
+RNAseq <- RNAseq_data %>%
+  dplyr::slice(c(12:n())) %>%
+  select(1, 17:26, 39:44) %>%
+set_names(c("Geneid", "CCND1_A28.15", "CCND1_A19.2", "CCND1_A26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7")) %>%
+  mutate(across(2:17, as.numeric)) %>%
+  filter(rowSums(across(2:17) > 1) > 0) 
+
+enhancers <- enhancers_full_data %>%
+  select(1:4)
+```
+
+Tidying up the diffbind output, looking for ATAC peaks that overlap with enhancers 
+```{r}
+diffbind <- diffbind_annot %>%
+  select(1:4, 20:43) %>%
+    set_names(c("peakID", "chr", "start", "end", "CCND1_A19.2", "CCND1_A26.14", "CCND1_A26.8", "CCND1_A28.15", "MAF_A26.11", "MAF_A26.12", "MMSET_A19.8", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A28.13", "ND_A26.18", "ND_A26.19", "ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28c.14", "CCND1_MM15", "CCND1_MM27", "CCND1_MM3", "CCND1_MM4", "CCND1_MM6", "MMSET_MM17", "MMSET_MM18", "MMSET_MM2")) %>%
+  left_join(diffbind_results %>%
+              select(9,10,11,12), by = "peakID") %>%
+  mutate(differential_ATAC_peak = case_when(
+   FDR < 0.05 & Fold > 0 ~ "increased MM", 
+   FDR < 0.05 & Fold < 0 ~ "decreased MM",
+   .default = "no change"))
+  
+
+
+overlap_diffbind_enhancers <- findOverlaps(query = GRanges(diffbind), subject = GRanges(enhancers)) %>%
+  as.data.frame()
+
+diffbind_enhancers <- diffbind %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  left_join(overlap_diffbind_enhancers, by = "queryHits") %>%
+  left_join(enhancers %>%
+              select(EnhancerID) %>%
+              mutate(subjectHits = as.numeric(row.names(.))), by = "subjectHits") %>%
+  select(-subjectHits, -queryHits) %>%
+  filter(!is.na(EnhancerID)) 
+
+enhancers_summarisied <- diffbind_enhancers %>%
+  select(differential_ATAC_peak, EnhancerID) %>%
+  unique() %>%
+  group_by(differential_ATAC_peak) %>%
+  summarise(n = n()) %>%
+  mutate(total = sum(n)) %>%
+  mutate(proportion = n/total)
+
+pie_differential_ATAC <- enhancers_summarisied %>%
+  ggplot(aes(x="", y=proportion, fill = proportion)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start=0) +
+  labs( x = "", y = "", fill = "") +
+  main_theme() +
+    theme(axis.text = element_blank(),
+        panel.grid  = element_blank(),
+        plot.title = element_text(size=12))
+
+
+
+differential_ATAC_peaks <- diffbind_enhancers %>%
+  filter(differential_ATAC_peak == "increased MM") %>%
+  select(2,3,4,1) %>%
+  write_tsv("Ju_20_differential_ATAC_enhancer_peaks.bed", col_names = FALSE)
+```
+
+Selecting only the ATAC peaks that overlap with enhancers, assigning the nearest gene from the gene_enhancer list and combining with EdgeR data
+```{r}
+diffbind_enhancers_with_genes <- diffbind_enhancers %>%
+  left_join(genes_enhancers) %>%
+  filter(!is.na(Geneid)) %>%
+  left_join(edger, suffix = c(".ATAC", ".RNA"), by = "Geneid")
+```
+
+```{r}
+diffbind_essential_genes <- diffbind_enhancers_with_genes %>%
+  mutate(essential_gene = ifelse(Geneid %in% essential_genes$geneid, "yes", "no"))
+
+diffbind_essential_genes_summar <- diffbind_essential_genes %>%
+  group_by(essential_gene, differential_ATAC_peak) %>%
+    filter(differential_ATAC_peak == "increased MM") %>%
+  summarise(n = n())
+
+essential_genes_list_diffbind <- diffbind_essential_genes %>%
+  select(Geneid, essential_gene, differential_ATAC_peak) %>%
+  filter(essential_gene == "yes") %>%
+  filter(differential_ATAC_peak == "increased MM") %>%
+  unique()
+```
+
+Volcano plot for gene expression
+```{r}
+volcano_expression <- edger_results %>%
+  select(1,2,5,6) %>%
+    mutate(differential_gene = case_when(
+   FDR < 0.05 & logFC > 0 ~ "downregulated", 
+   FDR < 0.05 & logFC < 0 ~ "upregulated",
+   .default = "no change"))  
+  
+subset_downregulated <- volcano_expression %>%
+    filter(differential_gene == "downregulated") %>%
+   arrange((PValue)) %>%
+  head(20)
+subset_upregulated <- volcano_expression %>%
+    filter(differential_gene == "upregulated") %>%
+   arrange((PValue)) %>%
+  head(20)
+  
+volcano_expression_plot <- volcano_expression %>%
+  ggplot(aes(x = -logFC, y = -log10(FDR), color = differential_gene)) +
+  geom_point() +
+  #geom_vline(aes(xintercept = 2)) +
+  #geom_text_repel(data=subset_upregulated, aes(label = Geneid)) +
+  main_theme()
+```
+
+Volcano plot for ATAC at enhancers associated with essential genes
+```{r}
+diffbind_subset <- diffbind_essential_genes %>%
+  filter(essential_gene == "yes") %>%
+   arrange((p.value)) %>%
+  head(20)
+volcano_plot_ATAC_signal <- diffbind_essential_genes %>%
+  filter(essential_gene == "yes") %>%
+  ggplot(aes(x = Fold, y = -log10(FDR.ATAC), color = differential_ATAC_peak)) +
+  geom_point() +
+    geom_text_repel(data=diffbind_subset, aes(label = Geneid)) +
+  main_theme()
+```
+
+New boxplot to show genes associated with enhancers vs the not associated ones
+```{r}
+RNAseq_enhancers <- RNAseq %>%
+  mutate(enhancer = ifelse(Geneid %in% diffbind_enhancers_with_genes$Geneid, "yes", "no")) %>%
+  select(2:18) %>%
+  melt(variable.name = "Patient", value.name = "expression", id.vars = "enhancer") %>%
+  mutate(subtype = str_split_i(Patient, "_", 1))
+
+boxplot_expression_enhancers <- RNAseq_enhancers %>%
+  ggplot(aes(x = enhancer, y = log2(expression), fill = subtype)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.4, position = position_dodge(width = 0.9)) +
+  scale_y_continuous(limits = c(-10,10)) +
+  main_theme()
+  
+```
+
+
+Correlation analysis for differentially expressed genes 
+```{r}
+Enhancer_ATAC_peaks_with_differential_genes <- diffbind_enhancers_with_genes %>%
+  filter(differential_gene == "upregulated" | differential_gene == "downregulated") %>%
+  select(peakID) %>%
+  filter(peakID != "PeakID17183") %>%
+  unlist()
+
+RNA_ATAC_correlation <- list()
+
+for (i in 1:length(Enhancer_ATAC_peaks_with_differential_genes)) {
+  
+  ATAC_peak <- Enhancer_ATAC_peaks_with_differential_genes[i]
+  ATAC_tag_values <- diffbind_enhancers_with_genes %>%
+    filter(peakID == ATAC_peak) %>%
+    select(5:19) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+  
+  associated_gene <- diffbind_enhancers_with_genes %>%
+    filter(peakID == ATAC_peak) 
+  gene <- associated_gene$Geneid[1]
+  
+  gene_expression <- RNAseq %>%
+    filter(Geneid == gene) %>%
+    select(2:16) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+  
+  joined_list <- full_join(ATAC_tag_values, gene_expression, by = "Patient")
+    
+  
+  correlation <- cor.test(joined_list$tag, joined_list$expression, method = "spearman")
+  
+  RNA_ATAC_correlation[[i]] <- data.frame(geneid = gene, peakID = ATAC_peak, correlation = correlation[4], p_value = correlation[3])
+}
+
+correlations_combined <- purrr::reduce(RNA_ATAC_correlation, rbind) %>%
+  mutate(correlation_group = case_when(
+    estimate > 0.4 ~ "darkred", 
+    estimate < -0.4 ~ "skyblue",
+    .default = "white"
+  ))
+```
+
+Correlation analysis for essential genes 
+```{r}
+diffbind_ATAC_enhancers_essential <- diffbind_enhancers_with_genes %>%
+   filter(Geneid %in% essential_genes$geneid) %>%
+     select(peakID) %>%
+   unlist()
+ 
+ RNA_ATAC_correlation_essential <- list()
+ for (i in 1:length(diffbind_ATAC_enhancers_essential)) {
+   
+   ATAC_peak <- diffbind_ATAC_enhancers_essential[i]
+   ATAC_tag_values <- diffbind_enhancers_with_genes %>%
+     filter(peakID == ATAC_peak) %>%
+     select(5:19) %>%
+     t() %>%
+     as.data.frame() %>%
+     set_names(c("tag")) %>%
+     rownames_to_column("Patient") 
+   
+   associated_gene <- diffbind_enhancers_with_genes %>%
+     filter(peakID == ATAC_peak) 
+   gene <- associated_gene$Geneid[1]
+   
+   gene_expression <- RNAseq %>%
+     filter(Geneid == gene) %>%
+     select(2:16) %>%
+     t() %>%
+     as.data.frame() %>%
+     set_names(c("expression")) %>%
+     rownames_to_column("Patient") 
+   
+   joined_list <- full_join(ATAC_tag_values, gene_expression, by = "Patient")
+        
+   correlation <- cor.test(joined_list$tag, joined_list$expression, method = "spearman")
+   
+   RNA_ATAC_correlation_essential[[i]] <- data.frame(geneid = gene, peakID = ATAC_peak, correlation = correlation[4], p_value = correlation[3])
+ }
+ 
+correlations_combined_essential <- purrr::reduce(RNA_ATAC_correlation_essential, rbind) %>%
+ mutate(rank = rank(estimate))
+
+
+```
+
+Ordering data for a heatmap 
+```{r}
+ATAC_peaks_annot_correlation <- diffbind %>%
+   filter(peakID %in% correlations_combined$peakID)
+ 
+#Combining diffbind and correlations dataset to produce a heatmap
+ ATAC_peaks_annot_correlation <- diffbind %>%
+   inner_join(correlations_combined %>% 
+                select(peakID, estimate)) %>%
+   mutate(rank = factor(rank(estimate, ties.method = "random"))) %>%
+      mutate(estimate = factor(estimate)) %>%
+   arrange(desc(estimate))
+```
+
+Making the PCA plot based on the ATAC peaks that overlap with enhancers associated with upregulated genes 
+```{r}
+ATAC_peaks_correlation_heatmap <- ATAC_peaks_annot_correlation %>%
+  filter(!is.na(estimate)) %>%
+  column_to_rownames("peakID") %>%
+  select(4:19) %>% #change select if more patients should be included in the heatmap/clustering 
+  mutate_all(~ log2(. +0.1)) %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t()
+
+PCA <- prcomp(t(ATAC_peaks_correlation_heatmap))
+summary(PCA)
+PCA_loadings <- PCA$rotation
+PCA_labels <- data.frame(sample = colnames(ATAC_peaks_correlation_heatmap), 
+                            subtype = colnames(ATAC_peaks_correlation_heatmap)) %>%
+  separate(subtype, into = c("subtype", "patient"), sep = "_") %>%
+  mutate(subtype_color = case_when(
+    subtype == "CCND1" ~ "skyblue", 
+    subtype == "MMSET" ~ "darkred", 
+    subtype == "MAF" ~ "forestgreen",
+    subtype == "ND" ~ "grey70"
+  ))
+
+#to use scale col manual mutate a new column to include the subtype 
+PCA_plot <- autoplot(PCA, data = t(ATAC_peaks_correlation_heatmap), color = PCA_labels$subtype_color) +
+    ggforce::geom_mark_ellipse(aes(fill = PCA_labels$subtype)) +
+  geom_text(vjust=-1, label=PCA_labels$patient, color = PCA_labels$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels$subtype_color, labels = PCA_labels$subtype) 
+
+
+PCA_PC1 <- PCA$rotation %>%
+  as.data.frame() %>%
+  select(PC1) 
+
+#Version of a PCA plot that considers all differential ATAC peaks that overlap with enhancers 
+PCA_df <- diffbind_enhancers %>%
+  filter(differential_ATAC_peak == "increased MM") %>%
+  select(5:20) %>% 
+  mutate_all(~ log2(. +0.1)) %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t()
+
+PCA_all_enhancers <- prcomp(t(PCA_df))
+summary(PCA_all_enhancers)
+
+PCA_plot_all_enhancers <- autoplot(PCA_all_enhancers, data = t(PCA_df), color = PCA_labels$subtype_color) +
+      ggforce::geom_mark_ellipse(aes(fill = PCA_labels$subtype)) +
+  geom_text(vjust=-1, label=PCA_labels$patient, color = PCA_labels$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels$subtype_color)
+```
+
+PCA plot based on gene expression of genes associated with differential enhancer 
+```{r}
+differential_genes_PCA_df <- RNAseq %>%
+  filter(Geneid %in% correlations_combined$geneid) %>%
+  select(2:17) %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t() %>%
+  as.matrix()
+
+PCA_labels_RNA <- data.frame(sample = colnames(differential_genes_PCA_df), 
+                            subtype = colnames(differential_genes_PCA_df)) %>%
+  separate(subtype, into = c("subtype", "patient"), sep = "_") %>%
+  mutate(subtype_color = case_when(
+    subtype == "CCND1" ~ "skyblue", 
+    subtype == "MMSET" ~ "darkred", 
+    subtype == "MAF" ~ "forestgreen",
+    subtype == "ND" ~ "grey70"
+  ))
+
+PCA_RNA <- prcomp(t(differential_genes_PCA_df))
+
+PCA_RNA_plot <- autoplot(PCA_RNA, data = t(differential_genes_PCA_df), color = PCA_labels_RNA$subtype_color) +
+  ggforce::geom_mark_ellipse(aes(fill = PCA_labels$subtype)) +
+    geom_text(vjust=-1, label=PCA_labels_RNA$patient, color = PCA_labels_RNA$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels_RNA$subtype_color)
+
+#combined version, takes RNAseq data for the differentially expressed genes, and enhancers that overlap with differential ATAC peaks 
+RNA_enhancers_combined <- 
+  rbind(differential_genes_PCA_df, ATAC_peaks_correlation_heatmap)
+
+PCA_combined_RNA_ATAC <- prcomp(t(RNA_enhancers_combined))
+
+PCA_RNA_ATAC_plot <- autoplot(PCA_combined_RNA_ATAC, data = t(RNA_enhancers_combined), color = PCA_labels_RNA$subtype_color) +
+
+    geom_text(vjust=-1, label=PCA_labels_RNA$patient, color = PCA_labels_RNA$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels_RNA$subtype_color)
+```
+
+Heatmap that keeps the order of the patients 
+```{r}
+pdf(file = "Ju_20_hetmap_legend.pdf", height = 8, width = 8)
+heatmap1 <- heatmap.2(ATAC_peaks_correlation_heatmap, Rowv = NA, Colv = NA, key = TRUE)  #change rowv and colv to keep order of the columns or rows 
+dev.off()
+```
+
+
+Elbow plot to determine the appropriate number of clusters for k-means 
+```{r}
+elbow_data <- as.data.frame(ATAC_peaks_correlation_heatmap)
+ 
+elbow(elbow_data)
+```
+
+K-means clustering approach and new heatmaps
+```{r}
+k_means_ATAC_peaks <- kmeans(ATAC_peaks_correlation_heatmap, centers = 6)
+
+k_means_order_joined <- cbind(ATAC_peaks_correlation_heatmap, k_means_ATAC_peaks$cluster) %>%
+  as.data.frame() %>%
+  rownames_to_column("peakID") %>%
+  left_join(diffbind_enhancers_with_genes %>%
+               select(peakID, Geneid))
+
+PeakID_clusters <- k_means_order_joined %>%
+  select(peakID, V17) %>%
+  arrange(V17) %>%
+  left_join(correlations_combined %>% select(peakID, estimate, correlation_group)) 
+
+k_means_order <- ATAC_peaks_correlation_heatmap[order(k_means_ATAC_peaks$cluster), ]
+
+pdf(file = "Ju_20_hetmap_k_means_peakID.pdf", height = 8, width = 8)
+heatmap_k_means <- heatmap(k_means_order, Rowv = NA, Colv = NA, RowSideColors = as.character(PeakID_clusters$correlation_group))
+dev.off()
+
+boxplot_correlation <- PeakID_clusters %>%
+  ggplot(aes(x = as.character(V17), y = estimate, 
+             fill = as.character(V17))) +
+  geom_hline(yintercept = 0, colour="grey70") +
+  geom_violin() +
+  geom_boxplot(width=0.2, fill="white") +
+  main_theme()
+```
+
+```{r}
+cluster_2_genes <- PeakID_clusters %>%
+  left_join(diffbind_enhancers_with_genes %>% select(peakID, Geneid)) %>%
+  filter(V17 == "2") %>%
+  select(Geneid) %>%
+  unique() 
+```
+
+Making a linegraph showing ATAC peak for each patient for each clusters
+```{r}
+linegraph_data <- k_means_order_joined %>%
+  melt(id.vars = "V17", variable.name = "Patient", value.name = "ATAC_signal", 
+       measure.vars = c("CCND1_A19.2", "CCND1_A26.14",  "CCND1_A26.8", "CCND1_A28.15", "MAF_A26.11", "MAF_A26.12", "MMSET_A19.8", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A28.13", "ND_A26.18", "ND_A26.19","ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28c.14")) %>%
+  group_by(Patient, V17) %>%
+  summarise(mean_ATAC = mean(ATAC_signal))
+
+linegraph <- linegraph_data %>%
+  ggplot(aes(x = Patient, y = mean_ATAC, group = as.factor(V17))) + 
+  geom_line()
+
+#Version with scaling the data 
+scaled_data_linegraph <- ATAC_peaks_annot_correlation %>%
+  filter(!is.na(estimate)) %>%
+  select(1, 5:20) %>% #change select if more patients should be included in the heatmap/clustering 
+  column_to_rownames("peakID") %>%
+  mutate_if(is.numeric, ~log2(. +0.1)) %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("peakID") %>%
+  left_join(PeakID_clusters) %>%
+  melt(id.vars = "V17", variable.name = "Patient", value.name = "ATAC_signal", 
+       measure.vars = c("CCND1_A19.2", "CCND1_A26.14",  "CCND1_A26.8", "CCND1_A28.15", "MAF_A26.11", "MAF_A26.12", "MMSET_A19.8", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A28.13", "ND_A26.18", "ND_A26.19","ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28c.14")) 
+  
+scaled_data_linegraph_summary <- scaled_data_linegraph %>%
+  group_by(Patient, V17) %>%
+  summarise(mean_ATAC = mean(ATAC_signal))
+  
+linegraph_scaled <- scaled_data_linegraph_summary %>%
+  ggplot(aes(x = Patient, y = mean_ATAC, group = as.factor(V17))) + 
+  geom_line(aes(color = as.factor(V17))) 
+
+#Boxplot version
+boxplot_clusters <- scaled_data_linegraph %>%
+  filter(V17 == 1) %>%
+  ggplot(aes(x = Patient, y = ATAC_signal)) +
+  geom_boxplot()
+```
+

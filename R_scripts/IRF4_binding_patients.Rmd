@@ -1,0 +1,201 @@
+This script infers IRF4 binding in patient enhancers using ChIP-seq IRF4 data in cell lines. Relevant plots for visualisation are produced.
+
+```{r}
+#Loading necessary libraries 
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+#Reading in the data
+#the start and end coordinates are the ones of enhancers, not IRF4 peaks 
+IRF4_peaks <- read_tsv("~/MM_thesis_repo/TF/IRF4/IRF_merged.txt") %>%
+  select(1:4, 9:12)
+enhancers <- read_tsv("~/MM_thesis_repo/enhancers_combined/enhancers_merged_updated_v2.txt") %>%
+  mutate(enhancer_type = case_when(
+    common == "yes" ~ "common",
+    unique != "not unique" & common == "no" ~ unique,
+    .default = "other"
+  )) %>%
+  select(1:4, 16) %>%
+  rename(EnhancerID = "PeakID")
+```
+
+```{r}
+#Finding overlap between IRF4 binding sites and enhancers
+overlap_IRF4_enhancers <- findOverlaps(query=GRanges(IRF4_peaks), subject=GRanges(enhancers)) %>%
+         as.data.frame()
+
+enhancers_IRF4 <- IRF4_peaks %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_IRF4_enhancers, by="queryHits") %>%
+  full_join(enhancers %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".IRF4", ".enhancer")) %>%
+    select(-queryHits, -subjectHits) %>%
+   mutate(enhancer_type = ifelse(
+     is.na(PeakID), "no enhancer", enhancer_type
+   )) %>%
+  mutate(IRF4_MM1S = 
+           ifelse(
+             !is.na(`MM1S_IRF4_forhomer.txt`), "yes", "no"
+           )) %>%
+  mutate(IRF4_H929 = 
+           ifelse(
+             !is.na(`H929_IRF4_forhomer.txt`), "yes", "no"
+           )) %>%
+  mutate(IRF4_EJM = 
+           ifelse(
+             !is.na(`EJM_IRF4_forhomer.txt`), "yes", "no"
+           )) %>%
+  mutate(IRF4_KMS12 = 
+           ifelse(
+             !is.na(`KMS12_IRF4_forhomer.txt`), "yes", "no"
+           )) %>%
+  select(-EJM_IRF4_forhomer.txt, -H929_IRF4_forhomer.txt, -KMS12_IRF4_forhomer.txt, -MM1S_IRF4_forhomer.txt) %>%
+  select(5:13) %>%
+ set_names(c("PeakID", "chr", "start", "end", "enhancer_type", "MM1S_IRF4", "H929_IRF4", "EJM_IRF4", "KMS12_IRF4")) %>%
+  filter(!is.na(chr))
+```
+
+```{r}
+#Reading in patient data
+CCND1_patients_data <- read_tsv("~/myeloma_thesis_R/patient_data/CCND1/CCND1_patients_overlap.txt") %>%
+  select(1:4, 9:12)
+CCND1_patients <- CCND1_patients_data %>%
+  mutate(across(5:8, ~if_else(is.na(.), 0, 1))) %>%
+  mutate(patient_number = rowSums(select(., 5:8))) %>%
+  select(1:4, 9) %>%
+  set_names(c("PeakID", "chr", "start", "end", "patient_number"))
+
+MMSET_patients_data <- read_tsv("~/myeloma_thesis_R/patient_data/MMSET/MMSET_patients_ATAC_merged.txt") %>%
+  select(1:4, 9:12)
+MMSET_patients <- MMSET_patients_data %>%
+  mutate(across(5:8, ~if_else(is.na(.), 0, 1))) %>%
+  mutate(patient_number = rowSums(select(., 5:8))) %>%
+  select(1:4, 9) %>%
+  set_names(c("PeakID", "chr", "start", "end", "patient_number"))
+```
+
+```{r}
+#Finding overlaps and join the enhancer data set with patients 
+overlap_CCND1 <- findOverlaps(query = GRanges(CCND1_patients), subject = GRanges(enhancers_IRF4)) %>%
+  as.data.frame()
+
+CCND1_IRF4 <- CCND1_patients %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_CCND1, by = "queryHits") %>%
+  full_join(enhancers_IRF4 %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".CCND1", ".enhancer")) %>%
+  select(-subjectHits, -queryHits) %>%
+  mutate(across(11:14, ~ if_else(is.na(.), "no", .))) 
+
+CCND1_IRF4_graph <- CCND1_IRF4 %>%
+  filter(enhancer_type == "common" | enhancer_type == "KMS12") %>%
+  group_by(enhancer_type, KMS12_IRF4, patient_number) %>%
+  summarise(n = n()) %>%
+  mutate(patient_number = ifelse(is.na(patient_number), "0", patient_number))
+
+totals_CCND1_IRF4 <- CCND1_IRF4_graph %>%
+  group_by(enhancer_type, KMS12_IRF4) %>%
+  summarise(total = sum(n))
+
+CCND1_IRF4_graph <- CCND1_IRF4_graph %>%
+left_join(totals_CCND1_IRF4) %>%
+  mutate(proportion = n/total) %>%
+  mutate(percentage = paste0(round(proportion*100, digits = 1), "%"))
+
+
+KMS12_IRF4.labs <- c("no IRF4 binding", "IRF4 binding")
+names(KMS12_IRF4.labs) <- c("no", "yes")
+
+enhancer_type.labs <- c("Common enhancers", "KMS12 unique enhancers")
+names(enhancer_type.labs) <- c("common", "KMS12")
+
+
+CCND1_IRF4_pie <- CCND1_IRF4_graph %>%
+  ggplot(aes(x="", y=proportion, fill=as.factor(patient_number), label = percentage)) +
+  facet_grid(KMS12_IRF4 ~ enhancer_type, 
+             labeller = labeller(KMS12_IRF4 = KMS12_IRF4.labs, enhancer_type = enhancer_type.labs)) +
+  geom_bar(width = 1, stat = "identity") +
+  labs( x = "", y = "", fill = "Number of patients") +
+  coord_polar("y", start=0) +
+  #geom_text(aes(label=percentage), position = position_stack(vjust = 0.5)) +
+  ggtitle("Binding of IRF4 at enhancers") +
+  scale_fill_brewer(palette = "Blues") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        panel.grid  = element_blank()) #+
+  geom_text_repel()
+```
+
+```{r}
+#Finding overlaps and join the enhancer data set with patients (MMSET)
+overlap_MMSET <- findOverlaps(query = GRanges(MMSET_patients), subject = GRanges(enhancers_IRF4)) %>%
+  as.data.frame()
+
+MMSET_IRF4 <- MMSET_patients %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_MMSET, by = "queryHits") %>%
+  full_join(enhancers_IRF4 %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".MMSET", ".enhancer")) %>%
+  select(-subjectHits, -queryHits) %>%
+  mutate(across(11:14, ~ if_else(is.na(.), "no", .))) %>%
+  mutate(patient_number = ifelse(is.na(patient_number), 0, patient_number))
+
+MMSET_IRF4_graph <- MMSET_IRF4 %>%
+  filter(enhancer_type == "common" | enhancer_type == "H929") %>%
+  group_by(enhancer_type, H929_IRF4, patient_number) %>%
+  summarise(n = n()) 
+
+totals_MMSET_IRF4 <- MMSET_IRF4_graph %>%
+  group_by(enhancer_type, H929_IRF4) %>%
+  summarise(total = sum(n))
+
+MMSET_IRF4_graph <- MMSET_IRF4_graph %>%
+left_join(totals_MMSET_IRF4) %>%
+  mutate(proportion = n/total) %>%
+  mutate(percentage = paste0(round(proportion*100, digits = 1), "%"))
+```
+
+
+```{r}
+#Make a graph to show that very few enhancers present in patients are bound by IRF4 in respective cell line 
+H929_IRF4.labs <- c("no IRF4 binding", "IRF4 binding")
+names(H929_IRF4.labs) <- c("no", "yes")
+
+enhancer_type.labs <- c("Common enhancers", "H929 unique enhancers")
+names(enhancer_type.labs) <- c("common", "H929")
+
+MMSET_IRF4_pie <- MMSET_IRF4_graph %>%
+  ggplot(aes(x="", y=proportion, fill=as.factor(patient_number), label = percentage)) +
+  facet_grid(H929_IRF4 ~ enhancer_type) +
+  geom_bar(width = 1, stat = "identity") +
+  labs( x = "", y = "", fill = "Number of patients") +
+  coord_polar("y", start=0) +
+  geom_text(aes(label=percentage), position = position_stack(vjust = 0.5)) +
+  ggtitle("Binding of IRF4 at enhancers") +
+  scale_fill_brewer(palette = "Greens") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        panel.grid  = element_blank()) #+
+  geom_text_repel()
+
+MMSET_IRF4_pie2 <- MMSET_IRF4_graph %>%
+  ggplot(aes(x="", y=proportion, fill=as.factor(H929_IRF4), label = percentage)) +
+  facet_grid(patient_number ~ enhancer_type) +
+  geom_bar(width = 1, stat = "identity") +
+  labs( x = "", y = "", fill = "IRF4 binding") +
+  coord_polar("y", start=0) +
+  #geom_text(aes(label=percentage), position = position_stack(vjust = 0.5)) +
+  ggtitle("Binding of IRF4 at enhancers") +
+  scale_fill_brewer(palette = "Greens") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        panel.grid  = element_blank()) +
+  geom_text_repel()
+
+```
+

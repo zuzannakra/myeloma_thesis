@@ -1,0 +1,139 @@
+This scripts performs validation of k-means clustering on patient ATAC-seq data from an independent dataset (Jin et al 2018)
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+differential_enhancer_ATAC_peaks <- read_tsv("~/MM_thesis_repo/general_data/enhancers/Ju_20_diffbind_ATAC_peaks_overlapping_enhancers.txt") 
+diffbind_annot <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_all_tag_annot.txt")
+peak_for_validation <- read_tsv("~/MM_thesis_repo/Ju_20_peaks_from_heatmap_for_validation.txt")
+k_means_peakIDs <- read_tsv("~/MM_thesis_repo/Ju_20_peakid_clusters_kmeans.txt")
+```
+
+Excluding MM4 as MM3 and MM4 are samples from the same patient 
+```{r}
+enhancers_Jin <- differential_enhancer_ATAC_peaks %>%
+  select(1,21:28, 32)
+
+diffbind_Jin <-  diffbind_annot %>% select(1:4, 36:38, 40:43) %>%
+    set_names(c("peakID", "chr", "start", "end", "CCND1_MM15", "CCND1_MM27", "CCND1_MM3", "CCND1_MM6", "MMSET_MM17", "MMSET_MM18", "MMSET_MM2")) 
+```
+
+Making a PCA plot for Jin patients 
+```{r}
+PCA_data <- diffbind_Jin %>%
+  select(1,5:11) %>%
+  column_to_rownames("peakID") %>%
+  mutate_all(~ log2(. +0.1)) %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t()
+  
+PCA_labels_Jin <- data.frame(sample = colnames(diffbind_Jin %>%
+                                                 select(5:11)), 
+                            subtype = colnames(diffbind_Jin %>%
+                                                 select(5:11))) %>%
+  separate(subtype, into = c("subtype", "patient"), sep = "_") %>%
+  mutate(subtype_color = case_when(
+    subtype == "CCND1" ~ "skyblue", 
+    subtype == "MMSET" ~ "darkred"
+  ))
+
+PCA_all_Jin <- prcomp(t(PCA_data))
+summary(PCA_all_Jin)
+PCA_loadings <- PCA_all_Jin$rotation
+
+PCA_plot <- autoplot(PCA_all_Jin, data = t(PCA_data), color = PCA_labels_Jin$subtype_color) +
+    ggforce::geom_mark_ellipse(aes(fill = PCA_labels_Jin$subtype)) +
+  geom_text(vjust=-1, label=PCA_labels_Jin$patient, color = PCA_labels_Jin$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels_Jin$subtype_color, labels = PCA_labels_Jin$subtype) 
+
+PCA_enhancers_differential_data <- diffbind_Jin %>%
+  filter(peakID %in% peak_for_validation$peakID) %>%
+  select(1,5:11) %>%
+  column_to_rownames("peakID") %>%
+  mutate_all(~ log2(. +0.1)) %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t()
+
+PCA_validation_Jin <- prcomp(t(PCA_enhancers_differential_data))
+summary(PCA_validation_Jin)
+PCA_validation_loadings <- PCA_validation_Jin$rotation
+
+PCA_plot_validation <- autoplot(PCA_validation_Jin, data = t(PCA_enhancers_differential_data), color = PCA_labels_Jin$subtype_color) +
+    ggforce::geom_mark_ellipse(aes(fill = PCA_labels_Jin$subtype)) +
+  geom_text(vjust=-1, label=PCA_labels_Jin$patient, color = PCA_labels_Jin$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels_Jin$subtype_color, labels = PCA_labels_Jin$subtype) 
+```
+
+PCA based on cluster 1 or 2 that showed to separate MMSET and CCND1 patients 
+
+```{r}
+cluster_peakIDs <- k_means_peakIDs %>%
+  filter(V17 == 6)
+
+PCA_enhancers_cluster_data <- diffbind_Jin %>%
+  filter(peakID %in% cluster_peakIDs$peakID) %>%
+  select(1,5:11) %>%
+  column_to_rownames("peakID") %>%
+  mutate_all(~ log2(. +0.1)) %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t()
+
+PCA_cluster_Jin <- prcomp(t(PCA_enhancers_cluster_data))
+summary(PCA_cluster_Jin)
+PCA_validation_loadings <- PCA_cluster_Jin$rotation
+
+PCA_plot_cluster <- autoplot(PCA_cluster_Jin, data = t(PCA_enhancers_cluster_data), color = PCA_labels_Jin$subtype_color) +
+    ggforce::geom_mark_ellipse(aes(fill = PCA_labels_Jin$subtype)) +
+  geom_text(vjust=-1, label=PCA_labels_Jin$patient, color = PCA_labels_Jin$subtype_color) +
+  main_theme() +
+  scale_color_manual(values = PCA_labels_Jin$subtype_color, labels = PCA_labels_Jin$subtype) 
+```
+
+Plot to show ATAC signal at enhancers in cluster 1
+```{r}
+Enhancers_cluster <- differential_enhancer_ATAC_peaks %>%
+  select(1,21:28) %>%
+  left_join(k_means_peakIDs %>%
+              select(peakID, V17)) %>%
+  filter(!is.na(V17))
+  
+Enhancers_cluster_melted <- Enhancers_cluster %>%
+  select(-peakID) %>%
+  melt(id.vars = "V17", variable.name = "Subject", value.name = "ATAC signal") %>%
+  separate(Subject, into = c("subtype", "patient"), sep = "_")
+  
+clusters_Jin_boxplot <- Enhancers_cluster_melted %>%
+  filter(V17 == 1 | V17 == 6) %>%
+  ggplot(aes(x = as.factor(V17), y = log2(`ATAC signal`), fill = as.factor(subtype))) +
+  geom_boxplot() +
+  main_theme()
+```
+
+
+Confirmation of cluster numbers 
+```{r}
+clusters_confirmation <- k_means_peakIDs %>% filter(estimate >0.4) %>%
+  group_by(V17) %>%
+  summarise(n = n())
+
+mean_estimates <- k_means_peakIDs %>%
+  group_by(V17) %>%
+  summarise(mean = mean(estimate))
+```
+
+
+

@@ -1,0 +1,190 @@
+Analysis of correlation between gene expression and accessibility at enhancers (see script patients_analysis_PCA_k_means for an example of correlation analysis) K-means for patient data and visualisation of enhancers in different clusters
+
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Reading in the data
+enhancerIDs <- read_tsv("~/MM_thesis_repo/general_data/enhancers/J_28_final_enhancerIDs.txt")
+differential_enhancer_ATAC_peaks <- read_tsv("~/MM_thesis_repo/general_data/enhancers/Ju_20_diffbind_ATAC_peaks_overlapping_enhancers.txt") %>%
+  filter(EnhancerID %in% enhancerIDs$EnhancerID)
+all_genes_correlations <- read_tsv("~/MM_thesis_repo/general_data/enhancers/Tag_ATAC_gene_expression_correlations_all_enhancer_peaks.txt")
+gene_expression <- read_tsv("~/MM_thesis_repo/general_data/Ju_20_RNAseq_data_shortened.txt")
+enhancerIDs <- read_tsv("~/MM_thesis_repo/general_data/enhancers/J_28_final_enhancerIDs.txt")
+essential_genes <- read_excel("~/MM_thesis_repo/general_data/MM_essential_genes.xlsx", col_names = FALSE) %>%
+  set_names("Geneid")
+```
+
+Ranking the genes based on correlations 
+```{r}
+correlations_increased_ranked <- all_genes_correlations %>%
+  filter(!is.na(correlation)) %>%
+  select(geneid, correlation) %>%
+  group_by(geneid) %>%
+  filter(correlation == max(correlation)) %>%
+  ungroup() %>%
+     mutate(rank = factor(rank(correlation, ties.method = "random"))) %>%
+   arrange(desc(correlation))
+
+correlations_subset <- correlations_increased_ranked %>%
+    filter(geneid %in% essential_genes$Geneid)
+
+negative_correlation <- all_genes_correlations %>%
+  filter(correlation < 0 & p_value < 0.05) %>%
+  select(geneid) %>%
+  unique()
+
+rank_genes_plot <- correlations_increased_ranked %>%
+  ggplot(aes(x = as.numeric(rank), y = as.numeric(correlation))) +
+  geom_hline(yintercept = 0, colour="grey70") +
+  geom_point() +
+  geom_text_repel(data=correlations_subset, aes(label = geneid, color = geneid),
+                  box.padding = 0.5, max.overlaps = Inf) +
+  geom_point(data=correlations_subset, aes(color = geneid)) +
+  main_theme() +
+    theme(
+    legend.position = "none"
+  )
+```
+
+Ranking the genes based on accessibility at enhancers 
+```{r}
+#normalise for peak width, add all values together then divide by the peak length 
+accessibility_rank <- differential_enhancer_ATAC_peaks %>%
+ select(3:14, 33) %>% #selecting only patients without normal donors 
+  mutate(peak_sum = rowSums(select(.,3:12))) %>%
+  mutate(normalised_peak_sum = peak_sum/(end - start)) %>%
+  select(Geneid, normalised_peak_sum) %>%
+  group_by(Geneid) %>%
+  filter(normalised_peak_sum == max(normalised_peak_sum)) %>%
+  ungroup() %>%
+  mutate(rank = factor(rank(normalised_peak_sum, ties.method = "random"))) %>%
+  arrange(desc(normalised_peak_sum))
+
+accessibility_subset <- accessibility_rank %>%
+  #filter(Geneid %in% c("CCND1", "CCND2", "IRF4", "CD38", "RUNX1", "SLAMF7", "IGH")) 
+  filter(Geneid %in% essential_genes$Geneid) %>%
+  filter(normalised_peak_sum > 0.3)
+
+rank_accessibility_plot <- accessibility_rank %>%
+  ggplot(aes(x = as.numeric(rank), y = as.numeric(normalised_peak_sum *100))) +
+  geom_hline(yintercept = 0, colour="grey70") +
+  geom_point() +
+  geom_text_repel(data=accessibility_subset, aes(label = Geneid, color = Geneid),
+                  box.padding = 0.5, max.overlaps = Inf) +
+  geom_point(data=accessibility_subset, aes(color = Geneid)) +
+  main_theme() +
+    theme(
+    legend.position = "none"
+  ) 
+  
+```
+
+
+```{r}
+k_means_df <- differential_enhancer_ATAC_peaks %>%
+  filter(peakID %in% all_genes_correlations$peakID) %>%
+  inner_join(all_genes_correlations %>% 
+               select(peakID, correlation)) %>%
+   mutate(rank = factor(rank(correlation, ties.method = "random"))) %>%
+      mutate(correlation = factor(correlation)) %>%
+   arrange(desc(correlation)) %>%
+  select(5:20) %>% #change select if more patients should be included in the heatmap/clustering 
+  mutate_all(~ log2(. +0.1)) %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  scale() 
+
+elbow_data <- as.data.frame(k_means_df)
+elbow(elbow_data)
+
+k_means <- kmeans(k_means_df, centers = 4)
+
+k_means_row <- kmeans(t(k_means_df), centers = 6)
+
+k_means_row_clusters <- as.data.frame(as.character(k_means_row$cluster)) %>%
+  set_names("cluster") %>%
+  arrange((cluster))
+
+k_means_order <- k_means_df[order(k_means$cluster), ]
+
+k_means_order_2 <- t(k_means_order)[order(k_means_row$cluster), ]
+
+patients_order <- k_means_order %>%
+  as.data.frame() %>%
+  rownames_to_column("Patient") %>%
+  select(Patient) %>%
+  mutate(patient_subtype = str_split_i(Patient, "_", 1)) %>%
+  mutate(subtype_number = as.numeric(factor(patient_subtype)))
+
+PeakID_clusters <- cbind(t(k_means_df), k_means_row$cluster) %>%
+  as.data.frame() %>%
+left_join(as.data.frame(t(k_means_df)))
+
+boxplot_clusters <- PeakID_clusters %>%
+  ggplot(aes(x = as.character(V17), y = estimate, 
+             fill = as.character(V17))) +
+  geom_hline(yintercept = 0, colour="grey70") +
+  geom_violin() +
+  geom_boxplot(width=0.2, fill="white") +
+  main_theme()
+
+
+heatmap_k_means <- heatmap((k_means_order_2), Rowv = NA, Colv = NULL, RowSideColors = k_means_row_clusters$cluster)
+
+pdf(file = "heatmap_patient_clustering.pdf", height = 8, width = 8)
+heatmap_k_means <- heatmap(t(k_means_order), Rowv = NULL, Colv = NA)
+dev.off()
+
+
+pdf(file = "heatmap_patient_clustering_reordered.pdf", height = 8, width = 8)
+heatmap_k_means <- heatmap(t(k_means_order), Rowv = NA, Colv = NULL)
+dev.off()
+
+pdf(file = "heatmap_patient_clustering_k_means_both_ways.pdf", height = 8, width = 8)
+heatmap_k_means <- heatmap((k_means_order_2), Rowv = NA, Colv = NA)
+dev.off()
+
+cluster_colors <- brewer.pal(4, "Set3")[k_means$cluster]
+names(cluster_colors) <- rownames(k_means_order)
+
+pdf(file = "heatmap_patient_clustering_with_annotations.pdf", height = 8, width = 8)
+heatmap_k_means <- heatmap(t(k_means_order), Rowv = NA, Colv = NULL, ColSideColors = cluster_colors)
+dev.off()
+```
+
+Clustering into 2 clusters only 
+```{r}
+k_means <- kmeans(k_means_df, centers = 2)
+k_means_row <- kmeans(t(k_means_df), centers = 2)
+
+# Reorder data based on clustering
+k_means_order <- k_means_df[order(k_means$cluster), ]
+
+# Create row side colors for clusters
+cluster_colors <- brewer.pal(2, "Set3")[k_means$cluster]
+names(cluster_colors) <- rownames(k_means_order)
+
+#Plot heatmap with heatmap(), including row side colors
+pdf(file = "heatmap_patient_2_clusters_reordered_with_rowsidecolors.pdf", height = 8, width = 8)
+heatmap(t(k_means_order), Rowv = NA, Colv = NULL, ColSideColors = cluster_colors, scale = "none")
+dev.off()
+```
+
+tSNE
+```{r}
+tsne_out <- Rtsne(k_means_df, perplexity = 5)
+
+tsne_plot <- data.frame(x = tsne_out$Y[,1], 
+                        y = tsne_out$Y[,2])
+tsne_plot <- 
+  ggplot(tsne_plot,label=Species, color) +
+                geom_point(aes(x=x,y=y))
+```
+

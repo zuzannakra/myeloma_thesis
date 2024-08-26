@@ -1,0 +1,204 @@
+EdgeR analysis for differential gene expression
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+Setting up the variables used in the script 
+```{r}
+analysis <- "MA_14_MM_ND_RNA"
+analysis_title <- "expression in MM patients and normal donors"
+Group <- c(rep("MM", 10), rep("ND", 5)) #change the group if more groups present 
+# use Batch to define which samples are batch pairs (set all to 1 if no batch effect)
+Batch <- 1
+desired_contrast <- "Expression = groupND-groupMM" #put as a list to have multiple comparisons 
+
+save_outputs <- TRUE  # Change to FALSE if you don't want to save outputs, TRUE if outputs are to be saved 
+```
+
+
+Reading the data
+```{r}
+counts <- read_tsv("~/myeloma_thesis_R/general_data/patients_feature_counts.txt", skip = 1) %>%
+ set_names(c(
+    "Geneid", "chr", "start", "end", "strand", "length", "CCND1_RS_3B.4", "CCND1_RS_1.4", "CCND1_RS_1.12", "CCND1_RS_1.19", "MMSET_RS_3B.3", "MMSET_RS_1.14", "MMSET_RS_2.6", "MMSET_RS_1.3", "MAF_RS_1.16", "MAF_RS_1.15", "ND_RS_1.22", "ND_RS_1.23", "ND_RS_2.8", "ND_RS_2.9", "ND_RS_4.25"
+    ))
+```
+
+Set up analysis dataframe and design matrix
+```{r}
+target <- data.frame(
+  # choose which samples (which columns) to analyse
+  Samples = colnames(counts)[c(7:21)] %>% factor(),
+  Group = Group,
+  Batch = Batch
+)
+
+target
+
+group <- target$Group
+design <- model.matrix(~0+group)
+design
+```
+Create list of DGEs
+```{r}
+counts_dge <- DGEList(counts = counts[,7:21], group=group, genes = counts[,1])
+print(counts_dge$samples)
+
+counts_cpm <- cpm(counts_dge)
+```
+
+Filter out enhancers with low tag in at least 5 samples 
+```{r}
+print("Genes before filtering:")
+nrow(counts_dge$counts)
+
+filter_cpm <- rowSums(counts_cpm > 1) >= 5 # Keep genes with > 1 cpm in at least the min num of patients within one group
+counts_dge <- counts_dge[filter_cpm,]
+
+print("Genes after filtering:")
+nrow(counts_dge$counts)
+```
+```{r}
+gene_list <- counts_dge$genes
+```
+
+
+Apply normalisation
+```{r}
+counts_norm <- calcNormFactors(counts_dge)
+counts_norm$samples # Shows normalisation effect
+```
+
+Generate PCA plots to look at sample similarity (two alternative plotting scripts)
+```{r}
+mds <- plotMDS(counts_norm)
+
+mds.df <- data.frame(
+  MDS1 = mds$x,
+  MDS2 = mds$y,
+  Group = group,
+  Sample = target$Samples
+)
+
+p.pca <- ggplot(
+  mds.df, 
+  aes(
+    x = MDS1, 
+    y= MDS2, 
+    fill=Group, 
+    label=Sample)
+  ) +
+  geom_point(
+    pch=21, size=3
+    ) +
+  geom_text_repel() +
+  ggtitle(
+    paste0("MDS of ", analysis_title)
+    ) +
+  theme_classic()
+p.pca
+
+if (save_outputs) {
+  ggsave(paste0(analysis, "_MDSplot.pdf"), p.pca,height=5,width=5, useDingbats=F)
+}
+```
+Plot a distance matrix
+```{r}
+distsRL <- dist(t(counts_norm$counts))
+mat <- counts_norm$counts %>%
+  t() %>%
+  dist() %>%
+  as.matrix()
+
+#rownames(mat) <-  group
+#colnames(mat) <-  group
+
+hmcol <- colorRampPalette(brewer.pal(9, "Blues"))(255)
+
+if (save_outputs) {
+  pdf(paste0(analysis, "_distancematrix.pdf"), 5, 5)
+  heatmap(mat, trace="none", col = rev(hmcol))
+  dev.off()
+}
+
+```
+
+Estimate dispersion and model fitting
+```{r}
+set_d <- estimateDisp(counts_norm, design)
+print("Common dispersion:")
+print(set_d$common.dispersion)
+
+pdf(paste0(analysis, "_BCVplot.pdf"), 5,5)
+plotBCV(set_d)
+dev.off()
+
+fit <- glmFit(set_d, design)
+```
+
+Set up contrast groups
+```{r}
+contrasts <- makeContrasts(
+  desired_contrast,
+  levels = design
+  )
+lrt <- glmLRT(fit, contrast=contrasts[,1])
+```
+
+Extract DEGs and export: Group1 vs Group2
+```{r}
+lrt.top_tags <- topTags(
+  lrt, n=nrow(counts_norm)
+  )
+
+lrt.table <- lrt.top_tags$table %>%
+  dplyr::select(Geneid, logFC, logCPM, LR, PValue, FDR)
+
+res.counts <- lrt.table %>%
+  left_join(data.frame(Geneid = counts_norm$genes, counts_norm$counts))
+
+res.cpm <- lrt.table %>%
+  left_join(data.frame(Geneid = counts[,1], counts_cpm))
+
+if (save_outputs) {
+ write_tsv(res.counts, paste0(analysis, "_counts.txt"))
+ write_tsv(res.cpm, paste0(analysis, "_cpm.txt"))
+}
+```
+
+MA plot
+```{r}
+p.ma <- ggplot(mapping = aes(x=logCPM, y=logFC)) +
+  geom_point(data = res.counts[res.counts$FDR >= 0.05,], col="black") +
+  geom_point(data = res.counts[res.counts$FDR < 0.05,], col="red") +
+  ggtitle(paste0("MA plot of ", analysis_title)) +
+  theme_classic()
+p.ma
+
+if (save_outputs) {
+ggsave(paste0(analysis, "_MAplot.pdf"), p.ma, height=5, width=5, useDingbats=F)
+}
+```
+Volcano plot
+```{r}
+p.volcano <- res.counts %>%
+  dplyr::mutate(class = case_when(
+    (FDR <= 0.05 & abs(logFC) < 1) ~ "FDR<0.05",
+    (FDR > 0.05 & abs(logFC) >= 1) ~ "logFC>1",
+    (FDR <= 0.05 & abs(logFC) >= 1) ~ "Both",
+    (FDR > 0.05 & abs(logFC) < 1) ~ "Unchanged"
+  )) %>%
+  ggplot(aes(x = logFC, y=-log10(PValue), col=class)) +
+    geom_point() +
+    scale_color_manual(values = c("FDR<0.05"="red2", "logFC>1"="orange", "Both"="green3", "Unchanged" = "grey60")) +
+    ggtitle(paste0("Volcano plot of ", analysis_title)) +
+    theme_classic()
+p.volcano
+
+
+if (save_outputs) {
+ggsave(paste0(analysis, "_volcano.pdf"), p.volcano, height=5, width=5, useDingbats=F)
+}
+```

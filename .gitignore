@@ -1,0 +1,15 @@
+#file extensions
+*.txt
+*.jpg
+*.jpeg
+*.xlsx
+*.pdf
+*.bed
+*.csv
+*.numbers
+*.dna
+*.xls
+*.Rproj
+*.Rhistory
+*.Rproj.user
+*.DS_Store

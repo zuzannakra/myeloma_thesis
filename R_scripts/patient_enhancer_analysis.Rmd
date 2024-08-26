@@ -1,0 +1,760 @@
+This scirpt performs gene enhancer assignment using TADs. It determines proportion of enhancers present in patients. It also includes downstream analysis from Diffbind and EdgeR outputs for differential genes and differentially accessible enhancers.
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Setting up variables 
+hm.palette <- colorRampPalette(brewer.pal(9, "YlOrRd"), space = "Lab")
+script_name <- "J_28_patients_analysis"
+
+save_outputs <- FALSE 
+```
+
+```{r}
+chr_list <- c(paste0("chr", seq(from=1, to=22)), "chrX")
+```
+
+Reading data
+```{r}
+TAD <- read_tsv("~/MM_thesis_repo/general_data/TAD/TAD_coordinates_hg19.txt") 
+gene_list <- read_tsv("~/MM_thesis_repo/general_data/hg38_refseq_genelist.txt", col_names = TRUE)
+RNAseq_data <- read_excel("~/MM_thesis_repo/general_data/RNAseq_salmon_TPM_all_files_overview_NC.xlsx")
+enhancers_full_data <- read_tsv("~/MM_thesis_repo/general_data/MA16_Enhancers_final_final.txt")
+enhancer_annot <- read_tsv("~/MM_thesis_repo/general_data/final_enhancers_patients_tag_annot.txt") %>%  select(1:4, 20:43) 
+merged_patients_output <- read_tsv("~/MM_thesis_repo/general_data/all_patients_merged_macs2.txt")
+enhancers_hg19 <- read_tsv("~/MM_thesis_repo/general_data/enhancers_list_hg19.bed", col_names = FALSE)
+gene_list_hg19 <- read_tsv("~/MM_thesis_repo/general_data/hg19_genelist.txt", col_names = FALSE, skip = 1)
+diffbind_results <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_DBA_CONDITION.txt")
+edger_results <- read_tsv("~/MM_thesis_repo/patient_data/MA_14_MM_ND_RNA_cpm.txt")
+essential_genes <- read_excel("~/MM_thesis_repo/general_data/MM_essential_genes.xlsx", col_names = FALSE) %>%
+  set_names("Geneid")
+
+#individual patients to show peak size distribution
+CCND1_A26.14 <- read_tsv("~/myeloma_thesis_R/patient_data/CCND1/SM4643249_A26.14.narrowPeak.bed", col_names = FALSE)
+MMSET_A28.13 <- read_tsv("~/myeloma_thesis_R/patient_data/MMSET/GSM4643227_A28.13.narrowPeak.bed", col_names = FALSE)
+MAF_A26.12 <- read_tsv("~/myeloma_thesis_R/patient_data/MAF/GSM4643235_A26.12.narrowPeak.bed", col_names = FALSE)
+CCND1_MM4 <- read_tsv("~/myeloma_thesis_R/patient_data/CCND1_M4.narrowPeak", col_names = FALSE)
+```
+
+Tidying up the data 
+```{r}
+merged_patients <- merged_patients_output %>%
+  select(1:4, 9:32) %>%
+  set_names(c("PeakID", "chr", "start", "end", "ND_A26.18", "ND_A26.19", "ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28.c14", "MMSET_A19.8", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "CCND1_A19.2", "CCND1_26.8", "CCND1_A28.15", "CCND1_A26.14", "MAF_A26.12", "MAF_A26.11", "CCND1_MM15", "MMSET_MM17", "MMSET_MM18", "CCND1_MM27", "MMSET_MM2", "CCND1_MM3", "CCND1_M4", "CCND1_MM6")) %>%
+  filter(chr %in% chr_list)
+
+enhancer_annot <- enhancer_annot %>%
+  set_names(c("PeakID", "chr", "start", "end", "CCND1_A19.2", "CCND1_A26.14", "CCND1_A26.8", "CCND1_A28.15", "MAF_A26.11", "MAF_A26.12", "MMSET_A19.8", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A28.13", "ND_A26.18", "ND_A26.19", "ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28c.14", "CCND1_MM15", "CCND1_MM27", "CCND1_MM3", "CCND1_MM4", "CCND1_MM6", "MMSET_MM17", "MMSET_MM18", "MMSET_MM2")) %>%
+  filter(if_any(starts_with("CCND1_") | starts_with("MAF_") | starts_with("MMSET_") | starts_with("ND_"), ~ . > 0.025))
+
+all_enhancers <- enhancers_full_data %>%
+  select(1:4)  #only keep ID, chr, start, end 
+
+all_enhancers_hg19 <- enhancers_hg19 %>%
+  select(4,1,2,3) %>%
+  set_names(c("EnhancerID", "chr", "start", "end")) %>%
+  mutate(diff = end- start) %>%
+  filter(chr %in% chr_list)
+
+CCND1_A26.14 <- CCND1_A26.14 %>%
+  select(4,1:3) %>%
+  set_names(c("PeakID", "chr", "start", "end"))
+MMSET_A28.13 <- MMSET_A28.13 %>%
+  select(4,1:3) %>%
+  set_names(c("PeakID", "chr", "start", "end"))
+MAF_A26.12 <- MAF_A26.12 %>%
+  select(4,1:3) %>%
+  set_names(c("PeakID", "chr", "start", "end"))
+CCND1_MM4 <- CCND1_MM4 %>%
+    select(4,1:3) %>%
+  set_names(c("PeakID", "chr", "start", "end"))
+
+#Tidying the reference genes for hg19 genome built 
+reference_genes_hg19 <- gene_list_hg19 %>%
+  select( 3, 4,5,6, 13) %>%
+  set_names(c("chr", "strand", "start", "end", "Geneid")) %>%
+  unique() %>%
+  mutate(start = ifelse(strand == "+", start, end)) %>%
+  mutate(end = start+1) %>%
+  select(-strand)
+
+diffbind <- diffbind_results %>%
+ select(1:3, 9:11) %>%
+  set_names(c("chr", "start", "end", "Fold", "p.value", "FDR")) %>%
+  filter(chr %in% chr_list) %>%
+  mutate(PeakID = paste0("Peak", row_number(.)))
+
+edger <- edger_results %>%
+  set_names(c("Geneid", "logFC", "logCPM", "LR", "PValue", "FDR", "CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15")) %>%
+ mutate(differential = case_when(
+   FDR < 0.05 & logFC > 0 ~ "downregulated", 
+   FDR < 0.05 & logFC < 0 ~ "upregulated",
+   .default = "no change")) 
+
+```
+
+Obtaining a gene list 
+```{r}
+#Setting up RNAseq analysis for expressed genes 
+RNAseq <- RNAseq_data %>%
+  dplyr::slice(c(12:n())) %>%
+  select(1, 17:26, 39:44) %>%
+set_names(c("Geneid", "CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7")) %>%
+  mutate(across(2:17, as.numeric)) %>%
+  filter(rowSums(across(2:17) > 1) > 0)
+
+#Obtaining a list of expressed genes, only TSS but considering the strand 
+genes <- gene_list %>%
+  select(3:6, 13) %>%
+  set_names(c("chr", "strand", "start", "end", "Geneid")) %>%
+  mutate(start = ifelse(strand == "-", end, start)) %>%
+  select(Geneid, chr, start) %>% 
+  mutate(end = start +1) %>%
+  unique() 
+
+#Obtaining a list of expressed genes with the hg19 coordinates
+genes_hg19 <- reference_genes_hg19 %>%
+  filter(Geneid %in% RNAseq$Geneid)
+```
+
+Assigning enhancers and genes to TADs, using files mapped to hg19 since the TAD file was only available in this format. Getting paris of enhancers and genes within the same TAD. 
+```{r}
+#Finding overlaps between enhancers and TADs (hg19)
+overlap_enhancer_tad <- findOverlaps(query = GRanges(all_enhancers_hg19), subject = GRanges(TAD), type = "within") %>%
+  as.data.frame()
+
+overlap_genes_tad <- findOverlaps(query = GRanges(genes_hg19), subject = GRanges(TAD)) %>%
+  as.data.frame()
+
+
+enhancers_tads <- all_enhancers_hg19 %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_enhancer_tad, by="queryHits") %>%
+  left_join(TAD %>% mutate(subjectHits = as.numeric(row.names(.))), by = "subjectHits", suffix = c(".enhancers", ".tads")) %>%
+  select(-queryHits, -subjectHits, -chr.tads, -start.tads, -end.tads, -diff) %>%
+  set_names(c("EnhancerID", "chr", "start", "end", "TAD_id"))
+  
+genes_tads <- genes_hg19 %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_genes_tad, by = "queryHits") %>%
+  left_join(TAD %>% mutate(subjectHits = as.numeric(rownames(.))), by = "subjectHits", suffix = c(".genes", ".tads")) %>%
+  select(-queryHits, -subjectHits, -chr.tads, -start.tads, -end.tads) %>%
+  select(4,1,2,3,5) %>%
+  set_names(c("Geneid", "chr", "start", "end", "TAD_id")) %>%
+  filter(chr %in% chr_list)
+```
+
+Assigning nearest gene to enhancer to check whether they fall into the same TAD 
+```{r}
+enhancers_genes_tads <- nearest(GRanges(enhancers_tads), GRanges(genes_tads)) %>%
+  as.data.frame() %>%
+  set_names("gene_index") %>%
+  cbind(enhancers_tads) %>%
+  left_join(genes_tads %>%
+              mutate(gene_index = as.integer(row.names(.))) %>%
+              select(c(-chr, -end, -start)),
+              by="gene_index", 
+            suffix = c(".enhancers", ".genes")
+            ) %>%
+  select(-gene_index) %>%
+  mutate(TAD_overlap = ifelse(
+    TAD_id.enhancers == TAD_id.genes, "yes", "no"
+  ))
+
+#Assigning each gene to a TAD is a way that, tad_ids are taken as the chr value, so that findOverlaps considers regions within the same tad as regions on the same chromosome and assigns them together 
+enhancers_changed_tads <- enhancers_tads 
+
+ enhancers_changed_tads$TAD_id <- gsub("TAD_", "chr", enhancers_changed_tads$TAD_id)
+ enhancers_changed_tads <- enhancers_changed_tads %>%
+   select(-chr) %>%
+   rename(TAD_id = "chr") %>%
+   filter(!is.na(chr))
+ 
+genes_changed_tads <- genes_tads 
+genes_changed_tads$TAD_id <- gsub("TAD_", "chr", genes_changed_tads$TAD_id)
+genes_changed_tads <- genes_changed_tads %>%
+  select(-chr) %>%
+  rename(TAD_id = "chr") %>%
+    filter(!is.na(chr))
+ 
+enhancers_genes_changed_tads <- nearest(GRanges(enhancers_changed_tads), GRanges(genes_changed_tads)) %>%
+  as.data.frame() %>%
+  set_names("gene_index") %>%
+  cbind(enhancers_changed_tads) %>%
+  left_join(genes_changed_tads %>%
+              mutate(gene_index = as.integer(row.names(.))) %>%
+              select(c( -end, -start)),
+              by="gene_index", 
+            suffix = c(".enhancers", ".genes")
+            ) %>%
+  select(EnhancerID, Geneid)
+```
+
+
+Overlapping merged patient ATAC peaks with enhancers and checking size of peaks distribution
+```{r}
+#make an overlap between merged patient peaks and enhancers 
+overlap_patient_enhancers <- findOverlaps(query = GRanges(merged_patients), subject = GRanges(all_enhancers)) %>%
+    as.data.frame
+
+patients_enhancers <- merged_patients %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_patient_enhancers, by="queryHits") %>%
+  left_join(all_enhancers %>%
+              select(EnhancerID) %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits") %>%
+  select(-queryHits, -subjectHits) %>%
+      mutate(enhancer = if_else(
+      is.na(EnhancerID), "no", "yes"
+    )) %>%
+    mutate(size = end - start)
+
+merged_peak_distribution <- patients_enhancers %>%
+  filter(enhancer == "yes") %>%
+  ggplot(aes(x = size)) +
+  geom_histogram(binwidth = 50)
+merged_peak_distribution
+```
+
+Overlapping enhancers with individual patients to determine size distribution 
+```{r}
+patients <- list(CCND1_A26.14, MMSET_A28.13, MAF_A26.12, CCND1_MM4)
+distribution <- list()
+
+for (i in seq_along(patients)) {
+  patient <- patients[[i]]
+  
+  overlap_patient <- findOverlaps(query = GRanges(patient), subject = GRanges(all_enhancers)) %>%
+    as.data.frame()
+  
+  patient_enhancers <- patient %>%
+    mutate(queryHits = as.numeric(row.names(.))) %>%
+    full_join(overlap_patient, by = "queryHits") %>%
+    left_join(all_enhancers %>%
+                select(EnhancerID) %>%
+                mutate(subjectHits = as.numeric(row.names(.))), 
+              by = "subjectHits") %>%
+    select(-queryHits, -subjectHits) %>%
+    mutate(enhancer = if_else(
+      is.na(EnhancerID), "no", "yes"
+    )) %>%
+    mutate(size = end - start)
+
+  distribution[[i]] <- patient_enhancers %>%
+    filter(enhancer == "yes") %>%
+    ggplot(aes(x = size)) + 
+    geom_histogram()
+}
+
+distribution_individual <- plot_grid(distribution[[1]], distribution[[2]], distribution[[3]], distribution[[4]])
+distribution_individual
+```
+
+Calculating the proportion of enhancers present in patients 
+```{r}
+  overlap_patient_enhancers <- findOverlaps(query = GRanges(all_enhancers), subject = GRanges(merged_patients)) %>%
+    as.data.frame()
+
+patients_enhancers_summar <- all_enhancers %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_patient_enhancers, by="queryHits") %>%
+  left_join(merged_patients %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits") %>%
+  select(-queryHits, -subjectHits) %>%
+      mutate(enhancer = if_else(
+      is.na(EnhancerID), "no", "yes"
+    )) %>%
+  mutate(across(9:32, ~ if_else(is.na(.), 0, 1))) %>% #choose columns with patient data
+  select(9:32) %>%
+  t()
+  patients_enhancers_numbers <- rowSums(patients_enhancers_summar)
+  patients_enhancers_proportions <- data.frame(n = patients_enhancers_numbers)
+  rownames(patients_enhancers_proportions) <- rownames(patients_enhancers_summar)
+  total_enhancers <- nrow(all_enhancers)
+  
+  patients_enhancers_proportions <- patients_enhancers_proportions %>%
+    mutate(total = total_enhancers) %>%
+    mutate(proportion = n / total) %>%
+    mutate(patient = rownames(.)) %>%
+    separate(patient, c("patient_type", "subject"), "_") %>%
+    mutate(dataset = ifelse(startsWith(subject, "M"), "Jin", "initial"))
+    
+```
+
+Make a plot to show the proportion of enhancers in each patient subgroup with the individual points 
+```{r}
+patients_proportions <- patients_enhancers_proportions %>%
+  group_by(patient_type) %>%
+  summarize(mean_proportion = mean(proportion) * 100, 
+            sd_proportion = sd(proportion) *100) 
+
+#Checking for statistical significance between proportion of enhancers in different group 
+res.aov <- aov(proportion ~ patient_type, data = patients_enhancers_proportions)
+summary(res.aov)
+
+barchart <- patients_proportions %>%
+  ggplot(aes(x = patient_type, y = mean_proportion)) +
+  geom_bar(stat = "identity") +
+  geom_point(data = patients_enhancers_proportions, aes(x = patient_type, y = proportion * 100, color = dataset)) +
+  labs(
+    x = "Patient subtype", 
+    y = "Percentage of MM enhancers present"
+  ) +
+  geom_errorbar(aes(ymin=mean_proportion-sd_proportion, ymax=mean_proportion+sd_proportion), width=.2,
+                 position=position_dodge(.9)) +
+  main_theme() 
+barchart
+
+proportion_ND <- c(0.2071989, 0.1864932, 0.1858874, 0.2486458, 0.2158232, 0.2179971)
+proportion_MMSET <- c(0.7048111, 0.1532074, 0.2273699, 0.2982894, 0.5705274, 0.7738418, 0.5155738)
+proportion_CCND1 <- c(0.4671775, 0.2987527, 0.2187812, 0.2144334, 0.4786172, 0.3607983, 0.5842124, 0.6557733, 0.6826087)
+
+wilcox.test(proportion_MMSET, proportion_CCND1)
+```
+
+Analysis based on Jin et al. 2018
+
+Making a heatmap to show clustering of patients prior to normalisation 
+```{r}
+heatmap_data <- enhancer_annot %>%
+  select(5:28) %>%
+  as.matrix() 
+
+heatmap_cor1 <- cor(heatmap_data)
+
+pdf(file = paste0(script_name, "_enhancers_tag_annot_heatmap_unscaled.pdf"), height = 6, width = 7)
+heatmap <- heatmap.2(heatmap_cor1, scale = "none", trace = "none", density.info = "none", col = hm.palette(100))
+dev.off()
+```
+
+Normalising the data and producing a heatmap 
+```{r}
+heatmap_transformed <- enhancer_annot %>%
+  column_to_rownames(var = "PeakID") %>%
+  select(4:27)  %>%
+  mutate_all(~ log2(. + 0.01)) %>%
+  as.matrix()
+
+tag_data_normalised <- normalize.quantiles(heatmap_transformed, copy=FALSE, keep.names=TRUE) 
+
+heatmap_cor2 <- cor(tag_data_normalised, method = "spearman")
+
+pdf(file = paste0(script_name, "_enhancers_tag_annot_heatmap_scaled_spearman.pdf"), height = 6, width = 7)
+heatmap_normalised <- heatmap.2(heatmap_cor2, scale = "none", trace = "none", density.info = "none", col = hm.palette(100))
+dev.off()
+
+#second option to normalise the data
+heatmap_scaled <- enhancer_annot %>%
+  select(5:28) %>%
+  scale(center = TRUE, scale = TRUE) %>%
+  as.data.frame()
+
+heatmap_cor3 <- cor(heatmap_scaled, method = "spearman")
+
+pdf(file = paste0(script_name, "_enhancers_tag_annot_heatmap_scaled_spearman.pdf"), height = 6, width = 7)
+heatmap_normalised <- heatmap.2(heatmap_cor2, scale = "none", trace = "none", density.info = "none", col = hm.palette(100))
+dev.off()
+
+#Z scaling the two data sets separately
+scaled_AB <- enhancer_annot %>%
+  select(5:20) %>%
+  melt(variable.name = "subject", value.name = "tag", 
+       measure.vars = c("CCND1_A28.15", "CCND1_A19.2", "CCND1_A26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19","ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28c.14")) 
+scaled_AB_tag <- scaled_AB %>%
+  select(tag) %>%  
+  scale(center = TRUE, scale = TRUE) %>%
+  as.data.frame() %>%
+  cbind(scaled_AB %>% select(subject))
+
+scaled_MM <- enhancer_annot %>%
+  select(21:28) %>%
+  melt(variable.name = "subject", value.name = "tag", 
+       measure.vars = c("CCND1_MM15", "CCND1_MM27", "CCND1_MM3", "CCND1_MM4", "CCND1_MM6", "MMSET_MM17", "MMSET_MM18", "MMSET_MM2")) 
+scaled_MM_tag <- scaled_MM %>%
+  select(tag) %>%
+  scale(center = TRUE, scale = TRUE) %>%
+  as.data.frame() %>%
+  cbind(scaled_MM %>% select(subject))
+
+patients <- c("CCND1_MM15", "CCND1_MM27", "CCND1_MM3", "CCND1_MM4", "CCND1_MM6", "MMSET_MM17", "MMSET_MM18", "MMSET_MM2")
+
+scaled_MM_recast <- list()
+
+for (i in 1:length(patients)) {  
+  patient_id <- patients[i]
+  scaled_MM_recast[[i]] <- scaled_MM_tag %>%
+    filter(subject == patient_id) %>%
+    select(-subject) %>%
+    set_names(patient_id)
+}
+
+scaled_MM_recast2 <- purrr::reduce(scaled_MM_recast, cbind)
+
+patients_AB <- c("CCND1_A28.15", "CCND1_A19.2", "CCND1_A26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A19.8")
+
+scaled_AB_recast <- list()
+
+for (i in 1:length(patients_AB)) {  
+  patient_id <- patients_AB[i]
+  scaled_AB_recast[[i]] <- scaled_AB_tag %>%
+    filter(subject == patient_id) %>%
+    select(-subject) %>%
+    set_names(patient_id)
+}
+
+scaled_AB_recast2 <- purrr::reduce(scaled_AB_recast, cbind)
+
+Z_scaled_all_patients <- cbind(scaled_AB_recast2, scaled_MM_recast2)
+
+heatmap_cor4 <- cor(Z_scaled_all_patients, method = "spearman")
+
+pdf(file = paste0(script_name, "_Z_scaled_all_heatmap_scaled_spearman.pdf"), height = 6, width = 7)
+heatmap_normalised <- heatmap.2(heatmap_cor4, scale = "none", trace = "none", density.info = "none", col = hm.palette(100))
+dev.off()
+```
+
+Normalising the data with removeBatchEffects
+```{r}
+batch <- factor(c("A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "B", "B", "B"))
+group <- factor(c(rep(1,10), rep(2,6), rep(3,8)))
+enhancers_removed_batch <- removeBatchEffect(
+  heatmap_data %>% log1p(), batch = batch, group = group) %>%
+  as.data.frame() %>%
+  scale(center = TRUE, scale = TRUE)
+
+heatmap_cor_without_batch <- cor(enhancers_removed_batch, method = "spearman")
+
+heatmap_without_batch <- heatmap.2(heatmap_cor_without_batch, trace = "none", col = hm.palette(100))
+
+boxplot(as.data.frame(log1p(heatmap_data)))
+boxplot(as.data.frame(enhancers_removed_batch))
+```
+ 
+Obtaining median value for control group (normal donors), calculating fold change, defining differential enhancers whre fold change is greater than 2.5 in at least half of the patients 
+```{r}
+data_fold_change <- tag_data_normalised %>%
+  as.data.frame() %>%
+  mutate(
+  ND_median = apply(select(., 10:15), 1, median)) %>% #specify the columns in which ND data is 
+  mutate_all(~ . - ND_median)
+
+differential_enhancers <- data_fold_change %>%
+  filter(rowSums(across(2:19) > 2.5)>0)
+
+DE_summary <- differential_enhancers %>%
+  mutate(MMSET_differential = ifelse(rowSums(across(c(7:10, 22:24)) > 2.5) > 3, "yes", "no")) %>% #specify the columns for MMSET patients 
+  mutate(MAF_differential = ifelse(rowSums(across(5:6) > 2.5) > 1, "yes", "no")) %>% #specify the columns for MAF patients 
+  mutate(CCND1_differential = ifelse(rowSums(across(c(1:4, 18:21)) > 2.5) > 4, "yes", "no")) %>% #specify the columns for CCND1 patients 
+  select(26:28) %>%
+  mutate(EnhancerID = rownames(.)) %>%
+  select(4, 1,2,3)
+  rownames(DE_summary) <- NULL
+```
+
+PCA plot for all patients 
+```{r}
+PCA <- t(heatmap_scaled) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  separate(Sample, into = c("Subtype", "Patient"))
+PCA.prcom <-  prcomp(t(heatmap_scaled)[1:16,]) 
+plot_PCA <- autoplot(PCA.prcom, data = PCA[1:16,], color = "Subtype")
+trial <- prcomp(t(heatmap_scaled))
+trial.plot <- autoplot(trial)
+dim(PCA[,c(2:24)])
+```
+
+Overlapping the differential ATAC peaks from diffbind with merged peaks of all patients, joining the gene information 
+```{r}
+diffbind_overlap <- findOverlaps(query = GRanges(all_enhancers), subject = GRanges(diffbind)) %>%
+  as.data.frame()
+
+enhancers_diffbind <- all_enhancers %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(diffbind_overlap, by="queryHits") %>%
+  left_join(diffbind %>% 
+              select(-chr, -start, -end) %>%
+              mutate(subjectHits = as.numeric(row.names(.))), by = "subjectHits") %>%
+  select(-queryHits, -subjectHits) %>%
+  left_join(enhancers_genes_changed_tads) 
+
+DE_increased_enhancers_with_genes <- enhancers_diffbind %>%
+  mutate(logFC = log(Fold +0.01)) %>%
+  filter(FDR < 0.05 & logFC > 0)
+
+DE_decreased_enhancers_with_genes <- enhancers_diffbind %>%
+  mutate(logFC = log(Fold +0.01)) %>%
+  filter(FDR < 0.05 & logFC < 0)
+```
+
+Plot to show gene expression of genes associated with a DE enhancer (with increased activity)
+```{r}
+RNAseq_plot <- RNAseq %>%
+  mutate(DE = case_when(
+    Geneid %in% DE_increased_enhancers_with_genes$Geneid ~ "DE",
+     Geneid %in% enhancers_genes_changed_tads$Geneid ~ "no DE", 
+    .default = "no enhancer")) %>%
+  melt(id.vars = c("Geneid", "DE"), variable.name = "subject", value.name = "gene_expression", 
+       measure.vars = c( "CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7")) %>%
+  mutate(subject_type = gsub("_.*$", "", subject)
+  ) %>%
+  unique() %>%
+  mutate(patient = ifelse(subject_type == "ND", "ND", "MM")) %>%
+  filter(gene_expression > 0)
+
+boxplot1 <- RNAseq_plot %>%
+    ggplot(aes(x = factor(subject_type), y = log2(gene_expression+0.001), fill = factor(DE))) +
+    geom_boxplot() +
+  #geom_hline(yintercept = reference, size = 1, color = "darkgrey") +
+    scale_fill_brewer(type = "qual", palette = 6) +
+    scale_y_continuous(limits = c(-12, 20)) +
+    labs(
+      x = "Patient subtype",
+      y = expression(paste("log"[2], "(gene expression)")), 
+      fill = "differential enhancer"
+    ) +
+  main_theme()
+
+if (save_outputs) {
+  ggsave((paste0("~/myeloma_thesis_R/new_data/analysis_july/", script_name, "_boxplot_expression_subtypes_ND.pdf")), boxplot1)
+}
+```
+Boxplot to show only patients vs ND, since the diffbind was comparing ND and MM 
+```{r}
+boxplot2 <- RNAseq_plot %>%
+    ggplot(aes(x = factor(patient), y = log2(gene_expression+0.001), fill = factor(DE))) +
+    geom_boxplot() +
+  #geom_hline(yintercept = reference, size = 1, color = "darkgrey") +
+    scale_fill_brewer(type = "qual", palette = 6) +
+    scale_y_continuous(limits = c(-12, 20)) +
+    labs(
+      x = "",
+      y = expression(paste("log"[2], "(gene expression)")), 
+      fill = "differential enhancer"
+    ) +
+  main_theme()
+
+if (save_outputs) {
+  ggsave((paste0("~/myeloma_thesis_R/new_data/analysis_july/", script_name, "_boxplot_expression_MM_ND.pdf")), boxplot2)
+}
+
+boxplot3 <- RNAseq_plot %>%
+    ggplot(aes(x = factor(DE), y = log2(gene_expression+0.001), fill = factor(patient))) +
+    geom_boxplot() +
+  #geom_hline(yintercept = reference, size = 1, color = "darkgrey") +
+    scale_fill_brewer(type = "qual", palette = 6) +
+    scale_y_continuous(limits = c(-12, 20)) +
+    labs(
+      x = "",
+      y = expression(paste("log"[2], "(gene expression)")), 
+      fill = "Group"
+    ) +
+  main_theme()
+
+if (save_outputs) {
+  ggsave((paste0("~/myeloma_thesis_R/new_data/analysis_july/", script_name, "_boxplot_expression_MM_ND_flipped.pdf")), boxplot3)
+}
+```
+
+Classifying the ATAC peaks from diffbind as promoter peaks 
+```{r}
+promoter_coordinates <- genes %>%
+  mutate(start = start - 2000) %>%
+  mutate(end = start + 4000)
+
+diffbind_promoter_overlap <- findOverlaps(query = GRanges(diffbind), subject = GRanges(promoter_coordinates)) %>%
+  as.data.frame()
+
+diffbind_final <- diffbind %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(diffbind_promoter_overlap, by="queryHits") %>%
+  left_join(promoter_coordinates %>% 
+              select(-chr, -start, -end) %>%
+              mutate(subjectHits = as.numeric(row.names(.))), by = "subjectHits") %>%
+  select(-queryHits, -subjectHits) %>%
+  left_join(enhancers_diffbind %>% select(EnhancerID, PeakID), by = "PeakID") %>%
+  mutate(logFC = Fold) %>%
+   mutate(differential_enhancer = case_when(
+   FDR < 0.05 & logFC > 0 ~ "higher MM", 
+   FDR < 0.05 & logFC < 0 ~ "lower MM",
+   .default = "no change")) %>%
+  rename(Geneid = "promoter_coordinate") %>%
+  left_join(enhancers_genes_changed_tads) %>%
+  rename(Geneid = "nearest_gene")
+
+proportions_genes_DE <- diffbind_final %>%
+  select(promoter_coordinate, EnhancerID, differential_enhancer) %>%
+  unique() %>%
+  mutate(promoter_coordinate = ifelse(is.na(promoter_coordinate), "no promoter", "promoter")) %>% 
+  mutate(EnhancerID = ifelse(is.na(EnhancerID), "no enhancer", "enhancer")) %>%
+  group_by(promoter_coordinate, EnhancerID, differential_enhancer) %>%
+  summarise(n = n())
+diffbind_genes <- diffbind_final %>%
+  mutate(DE_promoter = ifelse(FDR < 0.05 & logFC > 0, "yes", "no")) %>%
+  filter(!is.na(promoter_coordinate)) %>%
+  select(promoter_coordinate, DE_promoter) %>%
+  full_join(enhancers_diffbind %>%
+  mutate(logFC = log(Fold + 0.01)), by = c("promoter_coordinate" = "Geneid")) %>%
+  mutate(DE_enhancer = ifelse(FDR < 0.05 & logFC > 0, "yes", "no")) %>%
+  mutate(DE_enhancer = ifelse(is.na(DE_enhancer), "no", DE_enhancer)) %>%
+  mutate(DE_promoter = ifelse(is.na(DE_promoter), "no", DE_promoter)) %>%
+  filter(!is.na(PeakID)) %>%
+  select(promoter_coordinate, DE_enhancer, DE_promoter)
+  
+```
+
+Making new expression data frame 
+```{r}
+RNA_updated <- RNAseq %>%
+  full_join(diffbind_genes, by = c("Geneid" = "promoter_coordinate")) %>%
+  unique() %>%
+  group_by(Geneid) %>%
+  filter(if (n() > 1) DE_enhancer == "yes" else TRUE) %>%
+  filter(if (n() > 1) DE_promoter == "yes" else TRUE) %>%
+  ungroup() %>%
+  mutate(DE_enhancer = ifelse(is.na(DE_enhancer), "no", DE_enhancer)) %>%
+  mutate(DE_promoter = ifelse(is.na(DE_promoter), "no", DE_promoter)) %>%
+  mutate(differential = case_when(
+    DE_promoter == "yes" & DE_enhancer == "yes" ~ "differential promoter and differential enhancer", 
+    DE_promoter == "yes" & DE_enhancer == "no" ~ "differential promoter only", 
+    DE_promoter == "no" & DE_enhancer == "yes" ~ "differential enhancer only", 
+    DE_promoter == "no" & DE_enhancer == "no" ~ "no differential"
+  )) %>%
+  select(- DE_enhancer, -DE_promoter) %>%
+  melt(id.vars = c("Geneid", "differential"), variable.name = "subject", value.name = "gene_expression", 
+       measure.vars = c( "CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7")) %>%
+  mutate(subject_type = gsub("_.*$", "", subject)
+  ) %>%
+  unique() %>%
+  mutate(patient = ifelse(subject_type == "ND", "ND", "MM")) %>%
+  filter(gene_expression > 0)
+```
+
+Making a gene expression plot with to show gene expression depending on whether the promoter is differential 
+```{r}
+boxplot4 <- RNA_updated %>%
+    ggplot(aes(x = factor(differential), y = log2(gene_expression+0.001), fill = factor(patient))) +
+    geom_boxplot() +
+  #geom_hline(yintercept = reference, size = 1, color = "darkgrey") +
+    scale_fill_brewer(type = "qual", palette = 6) +
+    scale_y_continuous(limits = c(-12, 20)) +
+    scale_x_discrete(labels = label_wrap(10)) +
+    labs(
+      x = "",
+      y = expression(paste("log"[2], "(gene expression)")),
+      fill = "Group"
+    ) +
+    main_theme()
+```
+
+Making a boxplot to show ATAC signal based on the gene expression 
+```{r}
+ATAC_gene_expression <- enhancer_annot %>%
+  select(1,5:20) %>%
+  melt(variable.name = "subject", value.name = "ATAC_tag", measure.vars = c( "CCND1_A19.2", "CCND1_A26.14", "CCND1_A26.8", "CCND1_A28.15", "MMSET_A28.13", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28c.14")) %>%
+  mutate(subject_type = gsub("_.*$", "", subject)) %>%
+  unique() %>%
+  mutate(patient = ifelse(subject_type == "ND", "ND", "MM")) %>%
+  left_join(enhancers_genes_changed_tads, by = c("PeakID" = "EnhancerID")) %>%
+  filter(!is.na(Geneid)) %>%
+  left_join(edger %>% select(Geneid, logFC, FDR)) %>%
+  mutate(differentially_expressed = case_when(
+    FDR < 0.05 & logFC < 0 ~ "upregulated MM", 
+    FDR < 0.05 & logFC > 0 ~ "downregulated MM",
+    .default = "unchanged"))
+
+boxplot5 <- ATAC_gene_expression %>%
+    ggplot(aes(x = factor(differentially_expressed), y = log2(ATAC_tag+0.001), fill = factor(patient))) +
+    geom_boxplot() +
+
+    scale_fill_brewer(type = "qual", palette = 6) +
+    scale_y_continuous(limits = c(-12, 20)) +
+    scale_x_discrete(labels = label_wrap(10)) +
+    labs(
+      x = "",
+      y = expression(paste("log"[2], "(ATAC tag)")),
+      fill = "Group"
+    ) +
+    main_theme()
+```
+
+
+```{r}
+FC_ATAC_RNA_combined <- diffbind_final %>%
+  full_join(edger %>% select(Geneid, logFC), by = c("promoter_coordinate" = "Geneid"), suffix = c(".ATAC", ".RNA")) %>%
+  select(promoter_coordinate, logFC.ATAC, logFC.RNA, differential_enhancer) %>%
+  mutate(differential_enhancer = if_else(is.na(differential_enhancer), "no change", differential_enhancer)) %>%
+  filter(!is.na(promoter_coordinate) & !is.na(logFC.RNA)) %>%
+  unique()
+
+FC_RNA_ATAC_combined_promoters <- edger %>%
+  select(Geneid, logFC, differential) %>%
+  full_join(diffbind_final %>% select(promoter_coordinate, logFC), by = c("Geneid" = "promoter_coordinate"), suffix = c(".RNA", ".ATAC")) %>%
+  unique() %>%
+  filter(!is.na(logFC.RNA)) %>%
+  filter(!is.na(logFC.ATAC)) %>%
+  filter(logFC.ATAC != "NaN")
+
+FC_RNA_ATAC_combined_enhancers <- edger %>%
+  select(Geneid, logFC, differential) %>%
+  full_join(diffbind_final %>% select(nearest_gene, logFC), by = c("Geneid" = "nearest_gene"), suffix = c(".RNA", ".ATAC")) %>%
+  unique() %>%
+  filter(!is.na(logFC.RNA)) %>%
+  filter(!is.na(logFC.ATAC)) %>%
+  filter(logFC.ATAC != "NaN")
+
+       
+
+#in RNA, neg logFC means upregulated in MM, in ATAC neg logFC means lower in MM 
+scatter_plot <- FC_RNA_ATAC_combined_enhancers %>%
+  ggplot(aes(x = logFC.ATAC, y = logFC.RNA, color = differential)) +
+  geom_point()
+
+#version where only one enhancer (the one with highest ATAC) is kept per gene 
+scatter_plot2 <- FC_RNA_ATAC_combined_enhancers %>%
+  filter(differential == "upregulated") %>%
+  group_by(Geneid, logFC.RNA, differential) %>%
+  slice_max(order_by = logFC.ATAC, n = 1) %>%
+  ggplot(aes(x = logFC.ATAC, y = logFC.RNA, color = differential)) +
+  geom_point()
+
+
+#Boxplot to show logFC of ATAC at enhancers for genes with differential gene expression 
+boxplot_logFC <- FC_RNA_ATAC_combined_enhancers %>%
+  ggplot(aes(y = logFC.ATAC, x = differential)) + 
+  geom_boxplot() +
+  main_theme()
+
+scatter_plot2 <- FC_RNA_ATAC_combined_enhancers %>%
+  ggplot(aes(x = logFC.ATAC, y = logFC.RNA, color = differential)) +
+  geom_point()
+```
+
+Analysis for the MM essential genes 
+```{r}
+essential_genes_diffbind <- diffbind_final %>%
+  filter(!is.na(EnhancerID)) %>%
+  select(-promoter_coordinate) %>%
+  mutate(essential_gene = ifelse(nearest_gene %in% essential_genes$Geneid, "yes", "no")) %>%
+  filter(essential_gene == "yes") %>%
+  left_join(edger %>% select(Geneid, logFC, differential), by = c("nearest_gene" = "Geneid"), suffix = c(".ATAC", ".RNA"))
+
+scatter_plot_essential_genes <- essential_genes_diffbind %>%
+  ggplot(aes(x = logFC.ATAC, y = logFC.RNA, color = differential.ATAC)) +
+  geom_point()
+```
+
+```{r}
+differential_enhancers_MM_ND <- diffbind_final %>%
+  filter(differential_enhancer != "no change") %>%
+  filter(!is.na(EnhancerID)) %>%
+  mutate(CCND1_MMSET_differential = ifelse(EnhancerID %in% differential_enhancers$EnhancerID, "yes", "no")) #object from Ju_12 script 
+```
+

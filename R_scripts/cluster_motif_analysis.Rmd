@@ -1,0 +1,286 @@
+This script performs analysis of the Homer motif analysis output for enhancers identified via k-means clustering 
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+#Reading in the data 
+
+#cluster 2 in this list is actually cluster 5 
+clusters <- read_tsv("~/MM_thesis_repo/Ju_20_peakid_clusters_kmeans.txt")
+genes <- read_tsv("~/MM_thesis_repo/general_data/J_28_final_enhancer_gene_assignment.txt")
+
+diffbind_output <- read_tsv("~/MM_thesis_repo/general_data/diffbind/Ju_20_diffbind_enhancers_test.txt")
+
+chr_list <- c(paste0("chr", seq(from=1, to=22)), "chrX", "chrY")
+
+IRF4_H929 <- read_tsv("~/MM_thesis_repo/TF/IRF4/H929_IRF4.txt", skip = 39) %>%
+  filter(chr %in% chr_list) %>%
+select(1:4) %>%
+  set_names(c("PeakID.IRF4", "chr", "start", "end"))
+IRF4_KMS12 <- read_tsv("~/MM_thesis_repo/TF/IRF4/KMS12_IRF4_peaks.txt", skip = 39) %>%
+  filter(chr %in% chr_list) %>%
+  select(1:4) %>%
+    set_names(c("PeakID.IRF4", "chr", "start", "end"))
+
+essential_genes <- read_excel("~/MM_thesis_repo/general_data/MM_essential_genes.xlsx", col_names = FALSE) %>%
+  set_names("Geneid")
+
+motifs_cluster1 <- read_tsv("~/MM_thesis_repo/motif_analysis/cluster1.txt") %>% select(1, 4, 7, 9) %>%
+  set_names(c("Motif", "log_p_value", "%_target", "%_background")) %>%
+  mutate(Motif = str_split_i(Motif, "/", 1)) %>%
+    mutate(percentage_sequences_with_motif = as.numeric(gsub("%", "", `%_target`))) %>%
+  mutate(percentage_background = as.numeric(gsub("%", "", `%_background`))) %>%
+  mutate(cluster = 1) %>%
+  select(-`%_background`, -`%_target`)
+  
+motifs_cluster6 <- read_tsv("~/MM_thesis_repo/motif_analysis/cluster6.txt") %>% select(1, 4, 7, 9) %>%
+  set_names(c("Motif", "log_p_value", "%_target", "%_background")) %>%
+    mutate(Motif = str_split_i(Motif, "/", 1)) %>%
+      mutate(percentage_sequences_with_motif = as.numeric(gsub("%", "", `%_target`))) %>%
+  mutate(percentage_background = as.numeric(gsub("%", "", `%_background`))) %>%
+  mutate(cluster = 6) %>%
+  select(-`%_background`, -`%_target`) 
+
+motif_cluster5 <- read_tsv("~/MM_thesis_repo/motif_analysis/cluster 5.txt") %>% select(1, 4, 7, 9) %>%
+  set_names(c("Motif", "log_p_value", "%_target", "%_background")) %>% 
+    mutate(Motif = str_split_i(Motif, "/", 1)) %>%
+      mutate(percentage_sequences_with_motif = as.numeric(gsub("%", "", `%_target`))) %>%
+  mutate(percentage_background = as.numeric(gsub("%", "", `%_background`))) %>%
+  mutate(cluster = 5) %>%
+  select(-`%_background`, -`%_target`)
+
+```
+
+```{r}
+motifs_of_interest <- c("CTCF(Zf)", "IRF8(IRF)", "PU.1:IRF8(ETS:IRF)", "IRF4(IRF)", "Oct4(POU,Homeobox)", "ISRE(IRF)", "IRF2(IRF)", "BORIS(Zf)", "IRF1(IRF)", "IRF3(IRF)", "PRDM1(Zf)")
+```
+
+```{r}
+motifs_1_melted <- motifs_cluster1 %>%
+  melt(id.vars = c("Motif", "log_p_value", "cluster"), variable.name = "comparison", value.name = "enrichment")  %>%
+  mutate(comparison = factor(comparison, levels = c("percentage_background", "percentage_sequences_with_motif"))) 
+
+motifs_5_melted <- motif_cluster5 %>%
+  melt(id.vars = c("Motif", "log_p_value", "cluster"), variable.name = "comparison", value.name = "enrichment")  %>%
+  mutate(comparison = factor(comparison, levels = c("percentage_background", "percentage_sequences_with_motif"))) 
+
+motifs_6_melted <- motifs_cluster6 %>%
+  melt(id.vars = c("Motif", "log_p_value", "cluster"), variable.name = "comparison", value.name = "enrichment")  %>%
+  mutate(comparison = factor(comparison, levels = c("percentage_background", "percentage_sequences_with_motif"))) 
+```
+
+```{r}
+CTCF <- motifs_cluster1 %>%
+  filter(Motif == "CTCF(Zf)") %>%
+  rbind(motif_cluster5 %>%
+          filter(Motif == "CTCF(Zf)")) %>%
+  rbind(motifs_cluster6 %>%
+          filter(Motif == "CTCF(Zf)")) %>%
+  melt(id.vars = c("Motif", "log_p_value", "cluster"), variable.name = "comparison", value.name = "enrichment")  %>%
+  mutate(comparison = factor(comparison, levels = c("percentage_background", "percentage_sequences_with_motif"))) 
+```
+
+```{r}
+CTCF_plot <- CTCF %>%
+  ggplot(aes(y = enrichment, x = reorder(cluster, +enrichment), color = comparison, fill = -log_p_value)) +
+  geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_continuous(limits = c(0, 100), low = "yellow", high = "red") +
+  scale_color_manual(values = c("percentage_background" = "black", "percentage_sequences_with_motif" = "black")) +
+  main_theme()
+```
+
+
+```{r}
+motifs_cluser_1_plot <- motifs_1_melted %>%
+    filter(Motif %in% motifs_of_interest) %>%
+  ggplot(aes(x = enrichment, y = reorder(Motif, +enrichment), color = comparison, fill = -log_p_value)) +
+  geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_continuous(limits = c(0, 100), low = "yellow", high = "red") +
+  scale_color_manual(values = c("percentage_background" = "black", "percentage_sequences_with_motif" = "black")) +
+  main_theme()
+```
+
+```{r}
+motifs_cluser_5_plot <- motifs_5_melted %>%
+    filter(Motif %in% motifs_of_interest) %>%
+  ggplot(aes(x = enrichment, y = reorder(Motif, +enrichment), color = comparison, fill = -log_p_value)) +
+  geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_continuous(limits = c(0, 250), low = "yellow", high = "red") +
+  scale_color_manual(values = c("percentage_background" = "black", "percentage_sequences_with_motif" = "black")) +
+  main_theme()
+```
+
+```{r}
+motifs_cluser_6_plot <- motifs_6_melted %>%
+    filter(Motif %in% motifs_of_interest) %>%
+  ggplot(aes(x = enrichment, y = reorder(Motif, +enrichment), color = comparison, fill = -log_p_value)) +
+  geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_continuous(limits = c(0, 100), low = "yellow", high = "red") +
+  scale_color_manual(values = c("percentage_background" = "black", "percentage_sequences_with_motif" = "black")) +
+  main_theme()
+```
+
+```{r}
+clusters_combined <- clusters %>%
+  left_join(diffbind_output %>%
+              select(1:4, 32,33)) %>%
+  left_join(genes)
+
+#cluster 1 CCND1 higher 
+genes_cluster1 <- clusters_combined %>%
+  filter(V17 == "6") %>%
+  select(Geneid) %>%
+  unique()
+
+
+#cluster 5 higher in MM lower in ND
+genes_cluster5 <- clusters_combined %>%
+  filter(V17 == "2") %>%
+  select(Geneid) %>%
+  unique()
+
+#cluster 6 MMSET higher 
+genes_cluster6 <- clusters_combined %>%
+  filter(V17 == "1") %>%
+  select(Geneid) %>%
+  unique()
+```
+
+Peaks for motif 
+```{r}
+peaks_cluster1 <- clusters_combined %>%
+  filter(V17 == "6") %>%
+  select(5,6,7,1)
+
+peaks_cluster5 <- clusters_combined %>%
+  filter(V17 == "2") %>%
+  select(5,6,7,1)
+
+peaks_cluster6 <- clusters_combined %>%
+  filter(V17 == "1") %>%
+  select(5,6,7,1)
+
+```
+
+
+```{r}
+# Calculate the maximum length of the vectors
+max_length <- max(length(genes_cluster1$Geneid), length(genes_cluster5$Geneid), length(genes_cluster6$Geneid))
+
+# Create the data frame by filling shorter columns with NA
+gene_list_clusters <- data.frame(
+  cluster1 = c(genes_cluster1$Geneid, rep(NA, max_length - length(genes_cluster1$Geneid))),
+  cluster5 = c(genes_cluster5$Geneid, rep(NA, max_length - length(genes_cluster5$Geneid))),
+  cluster6 = c(genes_cluster6$Geneid, rep(NA, max_length - length(genes_cluster6$Geneid)))
+)
+
+all_three_clusters <- Reduce(intersect, list(genes_cluster1$Geneid, genes_cluster5$Geneid, genes_cluster6$Geneid))
+
+cluster_1_and_6 <- as.data.frame(intersect(genes_cluster1$Geneid, genes_cluster6$Geneid))
+cluster_1_and_5 <- as.data.frame(intersect(genes_cluster1$Geneid, genes_cluster5$Geneid))
+cluster_5_and_6 <- as.data.frame(intersect(genes_cluster5$Geneid, genes_cluster6$Geneid))
+
+cluster_1_unique <- setdiff(genes_cluster1$Geneid, union(genes_cluster5$Geneid, genes_cluster6$Geneid)) 
+
+  
+cluster_5_unique <- setdiff(genes_cluster5$Geneid, union(genes_cluster1$Geneid, genes_cluster6$Geneid))
+cluster_6_unique <- setdiff(genes_cluster6$Geneid, union(genes_cluster5$Geneid, genes_cluster1$Geneid))
+
+venn_data <- list(
+  Cluster1 = genes_cluster1$Geneid,
+  Cluster5 = genes_cluster5$Geneid,
+  Cluster6 = genes_cluster6$Geneid
+)
+
+venn.plot <- venn.diagram(
+  x = venn_data,
+  category.names = c("Cluster 1", "Cluster 5", "Cluster 6"),
+  filename = NULL, 
+  output = TRUE
+)
+grid.draw(venn.plot)
+```
+
+```{r}
+venn_cluster_1_6 <- euler(c(
+  "cluster1" = 90, 
+  "cluster1&cluster6" = 73,
+  "cluster6" =  57
+))
+
+plot_cluster_1_6 <- plot(venn_cluster_1_6, 
+    quantities = TRUE
+     )
+```
+
+Looking for IRF4 binding in the peaks for clusters 1,5,6 
+```{r}
+cluster <- c("cluster1_H929", "cluster1_KMS12", "cluster6_H929", "cluster6_KMS12")
+cluster_peaks_data <- list(peaks_cluster1, peaks_cluster1, peaks_cluster6, peaks_cluster6)
+
+IRF4_peaks_data <- list(IRF4_H929, IRF4_KMS12, IRF4_H929, IRF4_KMS12)
+
+clusters_IRF4 <- list()
+clusters_IRF4_summary <-list()
+
+for (i in 1:length(cluster)) {
+  cluster_peaks <- cluster_peaks_data[[i]]
+  IRF4_peaks <- IRF4_peaks_data [[i]]
+  
+    overlap <- findOverlaps(query = GRanges(cluster_peaks), subject = GRanges(IRF4_peaks)) %>%
+    as.data.frame()
+    
+    cluster_IRF4 <- cluster_peaks %>%
+      mutate(queryHits = as.numeric(row.names(.))) %>% 
+    full_join(overlap, by="queryHits") %>%
+    left_join(IRF4_peaks %>%
+              mutate(subjectHits = as.numeric(row.names(.))) %>%
+              select(c("PeakID.IRF4", "subjectHits")), 
+              by = "subjectHits") %>%
+    select(-subjectHits, -queryHits) %>%
+    mutate(IRF4_overlap = ifelse(is.na(PeakID.IRF4), "no overlap", "overlap IRF4"))
+    
+    summary <- cluster_IRF4 %>%
+      group_by(IRF4_overlap) %>%
+      summarise(n = n()) %>%
+      mutate(total = sum(n)) %>%
+      mutate(proportion = n/total)
+    
+    clusters_IRF4[[i]] <- cluster_IRF4
+    clusters_IRF4_summary[[i]] <- summary
+    
+    
+}
+
+cluster1_H929 <- clusters_IRF4[[1]]
+cluster1_KMS12 <- clusters_IRF4[[2]]
+cluster6_H929 <- clusters_IRF4[[3]]
+cluster6_KMS12 <- clusters_IRF4[[4]]
+
+cluster1_H929_summar <- clusters_IRF4_summary[[1]] %>%
+  mutate(cluster = "cluster1_H929")
+cluster1_KMS12_summar <- clusters_IRF4_summary[[2]] %>%
+  mutate(cluster = "cluster1_KMS12")
+cluster6_H929_summar <- clusters_IRF4_summary[[3]] %>%
+  mutate(cluster = "cluster6_H929")
+cluster6_KMS12_summar <- clusters_IRF4_summary[[4]] %>%
+  mutate(cluster = "cluster6_KMS12")
+```
+
+
+```{r}
+IRF4_proportions <- rbind(cluster1_H929_summar, cluster1_KMS12_summar, cluster6_H929_summar, cluster6_KMS12_summar)
+
+proportion_barchart <- IRF4_proportions %>%
+  filter(IRF4_overlap == "overlap IRF4") %>%
+  ggplot(aes(x = cluster, y = proportion)) +
+  geom_bar(stat = "identity") +
+  main_theme()
+```
+
+
+

@@ -1,0 +1,234 @@
+This script recalculated proportion of enhancers present in each patient both AB and Jin datasets and calculates correlation between the number of ATAC peaks and proporiton of enhancers. It also provides overlaps between patient groups and enhancers 
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+chr_list <- c(paste0("chr", seq(from=1, to=22)), "chrX")
+```
+
+```{r}
+#CCND1
+A26.14 <- read_tsv("~/MM_thesis_repo/patient_data/CCND1/SM4643249_A26.14.narrowPeak.bed")
+`26.8` <- read_tsv("~/MM_thesis_repo/patient_data/CCND1/GSM4643232_A26.8.narrowPeak.bed")
+A28.15 <- read_tsv("~/MM_thesis_repo/patient_data/CCND1/GSM4643252_A28.15.narrowPeak.bed")
+A19.2 <- read_tsv("~/MM_thesis_repo/patient_data/CCND1/GSM4643221_A19.2.narrowPeak.bed")
+
+#MAF
+A26.12 <- read_tsv("~/MM_thesis_repo/patient_data/MAF/GSM4643235_A26.12.narrowPeak.bed")
+A26.11 <- read_tsv("~/MM_thesis_repo/patient_data/MAF/GSM4643250_A26.11.narrowPeak.bed")
+
+#MMSET
+A28.13 <- read_tsv("~/MM_thesis_repo/patient_data/MMSET/GSM4643227_A28.13.narrowPeak.bed")
+A27.19 <- read_tsv("~/MM_thesis_repo/patient_data/MMSET/GSM4643251_A27.19.narrowPeak.bed")
+A19.8 <- read_tsv("~/MM_thesis_repo/patient_data/MMSET/GSM4643223_A19.8.narrowPeak.bed")
+`26.10B` <- read_tsv("~/MM_thesis_repo/patient_data/MMSET/GSM4643234_A26.10B.narrowPeak.bed")
+
+#ND 
+A26.18 <- read_tsv("~/MM_thesis_repo/patient_data/healthy control/GSM4643240_A26.18.narrowPeak.bed")
+A26.20 <- read_tsv("~/MM_thesis_repo/patient_data/healthy control/GSM4643242_A26.20.narrowPeak.bed")
+A27.21 <- read_tsv("~/MM_thesis_repo/patient_data/healthy control/GSM4643243_A27.21.narrowPeak.bed")
+A28.c14 <- read_tsv("~/MM_thesis_repo/patient_data/healthy control/GSM4643228_A28c.14.narrowPeak.bed")
+A27.22 <- read_tsv("~/MM_thesis_repo/patient_data/healthy control/GSM4643244_A27.22.narrowPeak.bed")
+A26.19 <- read_tsv("~/MM_thesis_repo/patient_data/healthy control/GSM4643241_A26.19.narrowPeak.bed")
+
+MM27 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM27_peaks.bed")
+MM18 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM18_peaks.bed")
+MM17 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM17_peaks.bed")
+MM15 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM15_peaks.bed")
+M4 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM4_peaks.bed")
+MM2 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM2_peaks.bed")
+MM6 <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM5_peaks.bed")
+```
+
+```{r}
+enhancers_full_data <- read_tsv("~/MM_thesis_repo/general_data/MA16_Enhancers_final_final.txt")
+merged_patients_output <- read_tsv("~/MM_thesis_repo/general_data/all_patients_merged_macs2.txt")
+all_enhancers <- enhancers_full_data %>%
+  select(1:4)
+```
+
+```{r}
+merged_patients <- merged_patients_output %>%
+  select(1:4, 9:32) %>%
+  set_names(c("PeakID", "chr", "start", "end", "ND_A26.18", "ND_A26.19", "ND_A26.20", "ND_A27.21", "ND_A27.22", "ND_A28.c14", "MMSET_A19.8", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "CCND1_A19.2", "CCND1_26.8", "CCND1_A28.15", "CCND1_A26.14", "MAF_A26.12", "MAF_A26.11", "CCND1_MM15", "MMSET_MM17", "MMSET_MM18", "CCND1_MM27", "MMSET_MM2", "CCND1_MM3", "CCND1_M4", "CCND1_MM6")) %>%
+  filter(chr %in% chr_list)
+
+all_enhancers <- enhancers_full_data %>%
+  select(1:4)
+```
+
+
+```{r}
+  overlap_patient_enhancers <- findOverlaps(query = GRanges(all_enhancers), subject = GRanges(merged_patients)) %>%
+    as.data.frame()
+
+patients_enhancers <- all_enhancers %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_patient_enhancers, by="queryHits") %>%
+  full_join(merged_patients %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits") %>%
+  select(-queryHits, -subjectHits) %>%
+      mutate(enhancer = if_else(
+      is.na(EnhancerID), "no", "yes"
+    )) %>%
+  mutate(across(9:32, ~ if_else(is.na(.), 0, 1))) %>%
+  select(1, 9:32)
+
+enhancer_ND <- patients_enhancers %>%
+  select(EnhancerID, starts_with("ND")) %>%
+  mutate(across(2:7, ~ if_else(!is.na(.), 1, 0))) %>%
+  mutate(control_present = rowSums(across(2:7))) %>%
+  filter(control_present > 1) %>%
+  filter(ND == "yes") %>%
+  select(EnhancerID) %>%
+  unique()
+  
+enhancers_MAF <- patients_enhancers %>%
+  select(EnhancerID, starts_with("MAF")) %>%
+  mutate(MAF = if_else(if_any(2:3, ~ . == 1), "yes", "no")) %>%
+  filter(MAF == "yes") %>%
+  select(EnhancerID) %>%
+  unique()
+  
+enhancers_MMSET <- patients_enhancers %>%
+  select(EnhancerID, starts_with("MMSET")) %>%
+  mutate(MMSET = if_else(if_any(2:5, ~ . == 1), "yes", "no")) %>%
+  filter(MMSET == "yes") %>%
+  select(EnhancerID) %>%
+  unique()
+
+Enhancer_CCND1 <- patients_enhancers %>%
+  select(EnhancerID, starts_with("CCND1")) %>%
+  mutate(CCND1 = if_else(if_any(2:5, ~ . == 1), "yes", "no")) %>%
+  filter(CCND1 == "yes") %>%
+  filter(!is.na(EnhancerID)) %>%
+  select(EnhancerID) %>%
+  unique()
+```
+
+Venn diagrams 
+```{r}
+CCND1_venn <- euler(c(
+  "CCND1" = 68286, 
+  "Enhancer" = 16266,
+  "CCND1&Enhancer" = 11794
+))
+MMSET_venn <- euler(c(
+  "MMSET" = 133577, 
+  "Enhancer" = 12994,
+  "MMSET&Enhancer" = 15066
+))
+MAF_venn <- euler(c(
+  "MAF" = 82294, 
+  "Enhancer" = 13511,
+  "MAF&Enhancer" = 14549
+))
+ND_venn <- euler(c(
+  "ND" = 325462, 
+  "Enhancer" = 15098,
+  "ND&Enhancer" = 12962
+))
+
+CCND1_plot <- plot(CCND1_venn, 
+    quantities = TRUE
+     )
+MMSET_plot <- plot(MMSET_venn, 
+    quantities = TRUE
+     )
+MAF_plot <- plot(MAF_venn, 
+    quantities = TRUE
+     )
+ND_plot <- plot(ND_venn, 
+    quantities = TRUE
+     )
+```
+
+
+
+```{r}
+patients_enhancers_unique <- patients_enhancers %>%
+   group_by(EnhancerID) %>%
+  summarise(
+    across(everything(), max),
+    .groups = "drop"
+  )
+
+patients_enhancers_summar <- patients_enhancers_unique %>%
+    select(-EnhancerID) %>%
+  t()
+  patients_enhancers_numbers <- rowSums(patients_enhancers_summar)
+  patients_enhancers_proportions <- data.frame(n = patients_enhancers_numbers)
+  rownames(patients_enhancers_proportions) <- rownames(patients_enhancers_summar)
+  total_enhancers <- nrow(all_enhancers)
+  
+  patients_enhancers_proportions <- patients_enhancers_proportions %>%
+    mutate(total = total_enhancers) %>%
+    mutate(proportion = n / total) %>%
+    mutate(patient = rownames(.)) %>%
+    mutate(patient_type = str_split_i(patient, "_", 1)) %>%   mutate(patient = str_split_i(patient, "_", 2)) 
+  
+patients_proportions <- patients_enhancers_proportions %>%
+  group_by(patient_type) %>%
+  summarize(mean_proportion = mean(proportion) * 100, 
+            sd_proportion = sd(proportion) *100) 
+```
+
+```{r}
+barchart <- patients_proportions %>%
+  ggplot(aes(x = patient_type, y = mean_proportion)) +
+  geom_bar(stat = "identity") +
+  geom_point(data = patients_enhancers_proportions, aes(x = patient_type, y = proportion * 100,color = patient)) +
+  labs(
+    x = "Patient subtype", 
+    y = "Percentage of MM enhancers present"
+  ) +
+  geom_errorbar(aes(ymin=mean_proportion-sd_proportion, ymax=mean_proportion+sd_proportion), width=.2,
+                 position=position_dodge(.9)) +
+  main_theme() 
+barchart
+```
+
+```{r}
+ND_values <- patients_enhancers_proportions %>%
+  filter(patient_type == "ND") %>% select(proportion)
+MMSET_values <- patients_enhancers_proportions %>%
+  filter(patient_type == "MMSET") %>% select(proportion)
+CCND1_values <- patients_enhancers_proportions %>%
+  filter(patient_type == "CCND1") %>% select(proportion)
+MAF_values <- patients_enhancers_proportions %>%
+  filter(patient_type == "MAF") %>% select(proportion)
+
+t.test(ND_values$proportion, MMSET_values$proportion)
+t.test(ND_values$proportion, CCND1_values$proportion)
+t.test(ND_values$proportion, MAF_values$proportion)
+```
+
+```{r}
+patients <- list(A26.14 = A26.14, `26.8` = `26.8`, A28.15 = A28.15, A19.2 = A19.2, A26.12 = A26.12, A26.11 = A26.11, A28.13 = A28.13, A27.19 = A27.19, A19.8 = A19.8, `26.10B` = `26.10B`, MM27 = MM27, MM18 = MM18, MM17 = MM17, MM15 = MM15, M4 = M4, MM2 = MM2, MM6 = MM6, A26.18 =A26.18, A26.20 = A26.20, A27.21 = A27.21, A28.c14 = A28.c14, A27.22 = A27.22, A26.19 = A26.19)
+
+peak_numbers <- data.frame(
+  Patient = names(patients), 
+  peak_number = sapply(patients, nrow)
+)
+
+proportions_with_peaks <- patients_enhancers_proportions %>%
+  left_join(peak_numbers, by = c("patient" = "Patient")) %>%
+  filter(!is.na(peak_number)) %>%
+  mutate(dataset = if_else(str_starts(patient, "M"), "Jin", "AB")) %>%
+  mutate(dataset = ifelse(patient_type == "ND", "ND", dataset)) %>%
+  mutate(MM = ifelse(patient_type == "ND", "ND", "MM"))
+
+
+proportions_vs_peaks <- proportions_with_peaks  %>%
+  ggplot(aes(x = peak_number, y = proportion, color = dataset)) +
+  geom_point() +
+  geom_smooth(data = subset(proportions_with_peaks, MM == "MM"), aes(x = peak_number, y = proportion), method = "lm", inherit.aes = FALSE, se = FALSE) +
+    stat_cor(data = subset(proportions_with_peaks, MM == "MM"), aes(x = peak_number, y = proportion), inherit.aes = FALSE, method = "pearson") +
+  main_theme()
+```
+

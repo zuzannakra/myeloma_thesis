@@ -1,0 +1,283 @@
+This script creates plots for individual genes to show correlation between gene expression and accessibility at enhancers in patients
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+RNAseq <- read_tsv("~/MM_thesis_repo/general_data/Ju_20_RNAseq_data_shortened.txt") %>%
+  set_names(c("Geneid", "CCND1_A28.15", "CCND1_A19.2", "CCND1_A26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7"))
+differential_enhancer_ATAC_peaks <- read_tsv("~/MM_thesis_repo/general_data/enhancers/Ju_20_diffbind_ATAC_peaks_overlapping_enhancers.txt") %>%
+  rename(ND_A26.20 = "ND_A28c.7") %>%
+  rename(ND_A28c.14 = "ND_A28.c15")
+diffbind_results <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_all_with_peakID.txt")
+diffbind_annot <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_all_tag_annot.txt")
+all_correlations <- read_tsv("~/MM_thesis_repo/general_data/enhancers/Tag_ATAC_gene_expression_correlations_all_enhancer_peaks.txt")
+essential_genes <- read_excel("~/MM_thesis_repo/general_data/MM_essential_genes.xlsx", col_names = FALSE) %>%
+  set_names("geneid")
+```
+
+```{r}
+essential_genes_correlations <- all_correlations %>%
+  filter(geneid %in% essential_genes$geneid)
+diffbind <- diffbind_annot %>%
+  select(1:4, 20:43) %>%
+    set_names(c("peakID", "chr", "start", "end", "CCND1_A19.2", "CCND1_A26.14", "CCND1_A26.8", "CCND1_A28.15", "MAF_A26.11", "MAF_A26.12", "MMSET_A19.8", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A28.13", "ND_A26.18", "ND_A26.19", "ND_A28c.7", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "CCND1_MM15", "CCND1_MM27", "CCND1_MM3", "CCND1_MM4", "CCND1_MM6", "MMSET_MM17", "MMSET_MM18", "MMSET_MM2")) %>%
+  left_join(diffbind_results %>%
+              select(9,11,12), by = "peakID") %>%
+  mutate(differential_ATAC_peak = case_when(
+   FDR < 0.05 & Fold > 0 ~ "increased MM", 
+   FDR < 0.05 & Fold < 0 ~ "decreased MM",
+   .default = "no change"))
+  
+CCND2_enhancer19512 <- data.frame(
+  EnhancerID = ("CCND2_new_enhancer"),
+  chr = "chr12", 
+  start = "4115259",
+  end = "4120428"
+)
+
+CCND2_ATAC_peaks_overlap <- findOverlaps(query = GRanges(CCND2_enhancer19512), subject = GRanges(diffbind)) %>%
+  as.data.frame()
+
+CCND2_new_enhancer <- CCND2_enhancer19512 %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(CCND2_ATAC_peaks_overlap, by="queryHits") %>%
+  left_join(diffbind %>% mutate(subjectHits = as.numeric(row.names(.))), by = "subjectHits") %>%
+  select(-queryHits, -subjectHits)
+```
+
+Correlations for the new CCND2 Enhancer PeakID92884
+```{r}
+ATAC_peak = "PeakID92884"
+
+CCND2_expression <- RNAseq %>%
+  filter(Geneid == "CCND2") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+  CCND2_tag_values <- CCND2_new_enhancer %>%
+    filter(peakID == ATAC_peak) %>%
+    select(9:24) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+  
+CCND2_new_joined_list <- full_join(CCND2_tag_values, CCND2_expression, by = "Patient") %>%
+    mutate(patient_type = str_split_i(Patient, "_", 1))
+correlation <- cor.test(CCND2_new_joined_list$tag, CCND2_new_joined_list$expression, method = "spearman")
+
+correlation
+
+CCND2_new_plot_enh19512 <- CCND2_new_joined_list %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  main_theme() +
+   stat_cor(aes(x = log2(tag), y = log2(expression)), inherit.aes = FALSE, method = "pearson") +
+ theme(legend.position = "none")
+  ggsave("S_01_CCND2_correlation_ATAC92884_enh_19512_no_line.pdf", CCND2_new_plot_enh19512, height = 7, width = 7)
+  CCND2_new_plot_enh19512
+```
+
+Plots for individual genes showing patients
+```{r}
+#CCND2 (PeakID79682) or negative (PeakID108512)
+CCND2_enhancers <- differential_enhancer_ATAC_peaks %>%
+  filter(Geneid == "CCND2") %>%
+  select(1:4, 32, 33) %>%
+  left_join(essential_genes_correlations, by = "peakID")
+
+ATAC_tag_values <- differential_enhancer_ATAC_peaks %>%
+    filter(peakID == "PeakID108512") %>%
+    select(5:20) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+
+
+gene_expression <- RNAseq %>%
+    filter(Geneid == "CCND2") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+combined_data <- full_join(ATAC_tag_values, gene_expression) %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+correlation_negative <- cor.test(combined_data$tag, combined_data$expression, method = "spearman")
+correlation_negative
+
+CCND2_plot <- combined_data %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  stat_cor(aes(x = log2(tag), y = log2(expression)), inherit.aes = FALSE, method = "pearson") +
+  #ggtitle("CCND2") +
+  main_theme() #+
+  theme(legend.position = "none")
+  #ggsave("S_01_CCND2_correlation_patients_main.pdf", CCND2_plot, height = 7, width = 7)
+  
+  
+cor.test(ATAC_tag_values$tag, gene_expression$expression)
+```
+
+```{r}
+#IRF4
+ATAC_tag_values_2 <- differential_enhancer_ATAC_peaks %>%
+    filter(peakID == "PeakID40429") %>%
+    select(5:20) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+
+gene_expression_2 <- RNAseq %>%
+    filter(Geneid == "IRF4") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+combined_data_2 <- full_join(ATAC_tag_values_2, gene_expression_2) %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+IRF4_plot <- combined_data_2 %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  ggtitle("IRF4") +
+  main_theme() 
+  ggsave("S_01_IRF4_correlation_patients.pdf", IRF4_plot)
+
+```
+
+```{r}
+#POU2AF1
+ATAC_tag_values_3 <- differential_enhancer_ATAC_peaks %>%
+    filter(peakID == "PeakID34883") %>%
+    select(5:20) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+
+gene_expression_3 <- RNAseq %>%
+    filter(Geneid == "POU2AF1") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+combined_data_3 <- full_join(ATAC_tag_values_3, gene_expression_3) %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+POU2AF1_plot <- combined_data_3 %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  ggtitle("POU2AF1") +
+  main_theme() 
+  ggsave("S_01_POU2AF1_correlation_patients.pdf", POU2AF1_plot)
+```
+
+```{r}
+#PRDM1
+ATAC_tag_values_4 <- differential_enhancer_ATAC_peaks %>%
+    filter(peakID == "PeakID52441") %>%
+    select(5:20) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+
+gene_expression_4 <- RNAseq %>%
+    filter(Geneid == "PRDM1") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+combined_data_4 <- full_join(ATAC_tag_values_4, gene_expression_4) %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+PRDM1_plot <- combined_data_4 %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  ggtitle("PRDM1") +
+  main_theme() 
+  ggsave("S_01_PRDM1_correlation_patients.pdf", PRDM1_plot)
+```
+
+```{r}
+#IKZF3
+ATAC_tag_values_5 <- differential_enhancer_ATAC_peaks %>%
+    filter(peakID == "PeakID43057") %>%
+    select(5:20) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+
+gene_expression_5 <- RNAseq %>%
+    filter(Geneid == "IKZF3") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+combined_data_5 <- full_join(ATAC_tag_values_5, gene_expression_5) %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+IKZF3_plot <- combined_data_5 %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  ggtitle("IKZF3") +
+  main_theme() 
+  ggsave("S_01_IKZF3_correlation_patients.pdf", IKZF3_plot)
+```
+
+```{r}
+#NFKB1
+ATAC_tag_values_6 <- differential_enhancer_ATAC_peaks %>%
+    filter(peakID == "PeakID89027") %>%
+    select(5:20) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("tag")) %>%
+    rownames_to_column("Patient") 
+
+gene_expression_6 <- RNAseq %>%
+    filter(Geneid == "NFKB1") %>%
+    select(2:17) %>%
+    t() %>%
+    as.data.frame() %>%
+    set_names(c("expression")) %>%
+    rownames_to_column("Patient") 
+
+combined_data_6 <- full_join(ATAC_tag_values_6, gene_expression_6) %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+NFKB1_plot <- combined_data_6 %>%
+  ggplot(aes(x = log2(tag), y = log2(expression), color = patient_type)) +
+  geom_point() +
+    geom_smooth(aes(x = log2(tag), y = log2(expression)), method = "lm", se = FALSE, inherit.aes = FALSE, color = "black") +
+  ggtitle("NFKB1") +
+  main_theme() 
+  ggsave("S_01_NFKB1_correlation_patients.pdf", NFKB1_plot)
+```
+

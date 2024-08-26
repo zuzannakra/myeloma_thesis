@@ -1,0 +1,172 @@
+Enhancer calling in patients (Jin et al 2018 dataset)
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+Reading in the data 
+```{r}
+MMSET_MM2_H3K27ac <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/acetylation/MMSET_MM2_H3K27ac_peaks.txt", skip = 37)
+MMSET_MM2_ATAC <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM2_peaks.bed", col_names = FALSE)
+CCND1_MM3_H3K27ac <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/acetylation/CCND1_MM3_H3K27ac_peaks.txt", skip = 37)
+CCND1_MM3_ATAC <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM3_peaks.bed", col_names = FALSE)
+CCND1_MM5_H3K27ac <-read_tsv("~/MM_thesis_repo/patient_data/external_patients/acetylation/CCND1_MM5_H3K27ac_peaks.txt", skip = 37)
+CCND1_MM5_ATAC <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/ATAC/MM5_peaks.bed", col_names = FALSE)
+promoter_coordinates <- read_tsv("~/MM_thesis_repo/general_data/promoter_coordinates.txt", col_names = FALSE) %>%
+  set_names(c("chr", "start", "end", "Geneid"))
+enhancers_previous <- read_tsv("~/MM_thesis_repo/general_data/MA16_Enhancers_final_final.txt") %>%
+  select(1:4)
+merged_patients <- read_tsv("~/MM_thesis_repo/patient_data/external_patients/external_patients_merged.txt")
+differential_enhancer_ATAC_peaks <- read_tsv("~/MM_thesis_repo/general_data/enhancers/Ju_20_diffbind_ATAC_peaks_overlapping_enhancers.txt") %>%
+  select(1,21:28, 32)
+diffbind_annot <- read_tsv("~/MM_thesis_repo/general_data/diffbind/DE_report_all_tag_annot.txt")
+```
+
+
+```{r}
+#Setting the list of chromosomes 
+chr_list <- c(paste0("chr", seq(from=1, to=22)), "chrX", "chrY")
+```
+
+
+```{r}
+#Enhancer calling from ChIP-seq H3K27ac and ATAC-seq data in three patients
+patient <- c("MMSET_MM2", "CCND1_MM3", "CCND1_MM5")
+ATAC_data_list <- list(MMSET_MM2_ATAC, CCND1_MM3_ATAC, CCND1_MM5_ATAC)
+H3K27ac_data_list <- list(MMSET_MM2_H3K27ac, CCND1_MM3_H3K27ac, CCND1_MM5_H3K27ac)
+
+new_patients_enhancers <- list()
+new_patients_summary <- list()
+
+for (i in 1:length(patient)) {
+  patient_ATAC <- ATAC_data_list[[i]]
+  patient_H3K27ac <- H3K27ac_data_list[[i]]
+  
+  H3K27ac <- patient_H3K27ac %>%
+    select(1:4) %>%
+    set_names(c("PeakID", "chr", "start", "end")) %>%
+    filter(chr %in% chr_list) %>%
+    GRanges() %>% reduce(min.gapwidth=5000) %>%
+    as.data.frame() %>%
+    mutate(PeakID = paste0("PeakID", row.names(.))) %>%
+    select(c(-width, -strand))
+  
+  ATAC <- patient_ATAC %>%
+    set_names(c("chr", "start", "end", "PeakID")) %>%
+    filter(chr %in% chr_list)
+    
+  enhancers <- setdiff(GRanges(H3K27ac), GRanges(promoter_coordinates), ignore.strand = TRUE) %>%
+    as.data.frame() %>%
+    mutate(EnhancerID = paste0("EnhancerID", row.names(.))) %>% 
+    filter(width > 250) %>%
+    select(6,1:3) %>%
+    set_names(c("EnhancerID", "chr", "start", "end")) %>%
+    select(2:4,1)
+  
+  overlap <- findOverlaps(query = GRanges(enhancers), subject = GRanges(ATAC)) %>%
+    as.data.frame()
+  
+  enhancers_with_ATAC <- enhancers %>%
+    mutate(queryHits = as.numeric(row.names(.))) %>% 
+    full_join(overlap, by="queryHits") %>%
+    left_join(ATAC %>%
+              mutate(subjectHits = as.numeric(row.names(.))) %>%
+              select(c("PeakID", "subjectHits")), 
+              by = "subjectHits") %>%
+    select(-subjectHits, -queryHits) %>%
+    mutate(ATAC_overlap = ifelse(is.na(PeakID), "no overlap", "overlap ATAC")) 
+  
+  enhancers_with_ATAC <- enhancers_with_ATAC %>%
+    filter(ATAC_overlap == "overlap ATAC")
+  
+  overlap_enhancer_list <- findOverlaps(query = GRanges(enhancers_with_ATAC), subject = GRanges(enhancers_previous)) %>%
+    as.data.frame()
+  
+  enhancers_final <- enhancers_with_ATAC %>%
+    mutate(queryHits = as.numeric(row.names(.))) %>%
+    full_join(overlap_enhancer_list, by = "queryHits") %>%
+    left_join(enhancers_previous %>%
+              mutate(subjectHits = as.numeric(row.names(.))) %>%
+              select(EnhancerID, subjectHits), 
+              by = "subjectHits", 
+              suffix = c(".new", ".previous")) %>%
+    select(-subjectHits, -queryHits) %>%
+    mutate(enhancer_overlap = ifelse(is.na(EnhancerID.previous), "no overlap", "overlap with known enhancer"))
+  
+  summary_proportions <- enhancers_final %>%
+    group_by(enhancer_overlap) %>%
+    summarise(n = n()) 
+  
+  new_patients_enhancers[[i]] <- enhancers_final
+  new_patients_summary[[i]] <- summary_proportions 
+}
+ enhancer_MMSET_MM2 <- new_patients_enhancers[[1]]
+ enhancer_CCND1_MM3 <- new_patients_enhancers[[2]]
+ enhancer_CCND1_MM5 <- new_patients_enhancers[[3]]
+ 
+ enhancer_MMSET_MM2_summary <- new_patients_summary[[1]]
+ enhancer_CCND1_MM5_summary <- new_patients_summary[[3]]
+ 
+ patients_overlap <- findOverlaps(query = GRanges(enhancer_MMSET_MM2), subject = GRanges(enhancer_CCND1_MM3)) %>%
+   as.data.frame()
+ 
+ new_patients_overlap <- enhancer_MMSET_MM2 %>%
+   select(EnhancerID.previous, EnhancerID.new, enhancer_overlap) %>%
+   mutate(queryHits = as.numeric(row.names(.))) %>%
+   full_join(patients_overlap, by = "queryHits") %>%
+   full_join(enhancer_CCND1_MM3 %>%
+               select(EnhancerID.new, enhancer_overlap) %>%
+               mutate(subjectHits = as.numeric(row.names(.))),
+             by = "subjectHits",
+             suffix = c(".MM2", ".MM3")) %>%
+   select(-subjectHits, -queryHits) %>%
+   full_join(enhancers %>% 
+               select(EnhancerID) %>%
+               set_names("EnhancerID.previous"))
+ 
+ new_patients_overlap_summary <- new_patients_overlap %>%
+   select(EnhancerID.previous, EnhancerID.new.MM2, EnhancerID.new.MM3) %>%
+   mutate_all(~ if_else(is.na(.), 0, 1)) %>%
+   group_by(EnhancerID.previous, EnhancerID.new.MM2, EnhancerID.new.MM3) %>%
+   summarise(n = n())
+```
+
+Overlap between the three patients and old enhancers 
+```{r}
+overlap_combined <- findOverlaps(query = GRanges(merged_patients), subject = GRanges(enhancers)) %>%
+   as.data.frame()
+
+overlap_combined_df <- merged_patients %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  select(MM2_for_merge.txt, MM3_for_merge.txt, MM5_for_merge.txt, queryHits) %>%
+  full_join(overlap_combined, by = "queryHits") %>%
+  full_join(enhancers %>%
+              select(EnhancerID) %>%
+               mutate(subjectHits = as.numeric(row.names(.))), 
+              by = "subjectHits") %>%
+  select(-subjectHits, -queryHits) 
+
+overlap_combined_summary <- overlap_combined_df %>%
+  mutate_all(~ if_else(is.na(.), FALSE, TRUE)) %>%
+   group_by(MM2_for_merge.txt, MM3_for_merge.txt, MM5_for_merge.txt, EnhancerID) %>%
+   summarise(n = n())
+
+venn <- euler(c(
+  "MM2" = 4229, 
+  "MM2&MM3" = 1313,
+  "MM3" = 3467,
+  "MM3&Enhancer" = 438,
+  "MM3&MM5&Enhancer" = 3420,
+  "MM2&Enhancer" = 239,
+  "MM2&MM5&Enhancer" = 1597,
+  "MM2&MM3&Enhancer" = 139,
+  "MM2&MM3&MM5&Enhancer" = 6859,
+  "Enhancer" = 5958, 
+  "MM5&Enhancer" = 4167
+))
+
+venn_plot <- plot(venn, 
+    quantities = TRUE
+     )
+```

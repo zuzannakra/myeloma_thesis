@@ -1,0 +1,164 @@
+This script creates a heatmap based on all ATAC peaks in patients as well as for different subgroups
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+#Reading in the data
+all_data_matrix <- read_tsv("~/MM_thesis_repo/patient_data/all_patients_enhancers_merged_count.matrix.txt") %>%
+  rename(`peak overlap totals, cmd = mergePeaks GSM4643221_A19.2.narrowPeak.bed GSM4643223_A19.8.narrowPeak.bed GSM4643227_A28.13.narrowPeak.bed GSM4643232_A26.8.narrowPeak.bed GSM4643234_A26.10B.narrowPeak.bed GSM4643235_A26.12.narrowPeak.bed GSM4643250_A26.11.narrowPeak.bed GSM4643251_A27.19.narrowPeak.bed GSM4643252_A28.15.narrowPeak.bed SM4643249_A26.14.narrowPeak.bed GSM4643241_A26.19.narrowPeak.bed GSM4643244_A27.22.narrowPeak.bed GSM4643228_A28c.14.narrowPeak.bed GSM4643243_A27.21.narrowPeak.bed GSM4643242_A26.20.narrowPeak.bed GSM4643240_A26.18.narrowPeak.bed EJM_formerge.txt H929_formerge.txt KMS12_formerge.txt MM1S_formerge.txt -matrix all_patients_enhancers_merged_matrix.txt` = "file") %>%
+  column_to_rownames(var = "file")
+        
+patients_enhancers_heatmap <- all_data_matrix %>%
+   filter(row_number() <= 16) %>%
+  select(EJM_formerge.txt, H929_formerge.txt, KMS12_formerge.txt, MM1S_formerge.txt) %>%
+  set_names(c("EJM", "H929", "KMS12", "MM1S")) %>%
+  as.matrix
+
+rownames(patients_enhancers_heatmap) <- c("CCND1_A19.2", "MMSET_A19.8", "MMSET_A28.13", "CCND1_26.8", "MMSET_26.10B", "MAF_A26.12", "MAF_A26.11", "MMSET_A27.19", "CCND1_A28.15", "CCND1_A26.14", "ND_A26.19", "ND_A27.22", "ND_A28c.14", "ND_A27.21", "ND_A26.20", "ND_A26.18")
+
+
+
+pdf(file = "heatmap.pdf")
+heatmap_scaled<- scale(patients_enhancers_heatmap)
+heatmap1 <- heatmap(heatmap_scaled, scale = "none")
+dev.off()
+
+#Attempting to manually scale the data taking into account the starting number of ATAC peaks for each patient 
+ATAC_peaks_numbers <- read_excel("~/myeloma_thesis_R/general_data/total_numbers_ATAC.xlsx", col_names = FALSE) %>%
+  set_names(c("file", "total_number")) %>%
+  column_to_rownames(var = "file")
+ATAC_patients_numbers <- ATAC_peaks_numbers %>%
+  slice_tail(n = 16)
+ATAC_enhancers_numbers <- ATAC_peaks_numbers %>%
+  slice_head(n = 4) %>%
+  t() %>% as.data.frame() %>%
+  set_names(c("EJM", "KMS12", "MM1S", "H929")) 
+
+rownames(ATAC_enhancers_numbers) <- NULL
+
+patients_enhancers_normalised <- all_data_matrix %>%
+     filter(row_number() <= 16) %>%
+  select(EJM_formerge.txt, H929_formerge.txt, KMS12_formerge.txt, MM1S_formerge.txt) %>%
+  set_names(c("EJM", "H929", "KMS12", "MM1S")) %>%
+  cbind(ATAC_patients_numbers) %>%
+  mutate(across(1:4, ~ .x/total_number)) %>% #normalising for the initial number of ATAC peaks in each patient
+  select(-total_number) %>%
+  mutate(EJM = EJM/ATAC_enhancers_numbers$EJM) %>% #Normalising for number of enhancers in each list 
+  mutate(KMS12 = KMS12/ATAC_enhancers_numbers$KMS12) %>%
+  mutate(H929 = H929/ATAC_enhancers_numbers$H929) %>%
+  mutate(MM1S = MM1S/ATAC_enhancers_numbers$MM1S) %>%
+  as.matrix()
+
+patients_enhancers_enhancer_normalised <- all_data_matrix %>%
+     filter(row_number() <= 16) %>%
+  select(EJM_formerge.txt, H929_formerge.txt, KMS12_formerge.txt, MM1S_formerge.txt) %>%
+  set_names(c("EJM", "H929", "KMS12", "MM1S")) %>%
+  mutate(EJM = EJM/ATAC_enhancers_numbers$EJM) %>% #Normalising for number of enhancers in each list 
+  mutate(KMS12 = KMS12/ATAC_enhancers_numbers$KMS12) %>%
+  mutate(H929 = H929/ATAC_enhancers_numbers$H929) %>%
+  mutate(MM1S = MM1S/ATAC_enhancers_numbers$MM1S) %>%
+  as.matrix()
+
+patients_enhancers_patient_normalised <- all_data_matrix %>%
+     filter(row_number() <= 16) %>%
+  select(EJM_formerge.txt, H929_formerge.txt, KMS12_formerge.txt, MM1S_formerge.txt) %>%
+  set_names(c("EJM", "H929", "KMS12", "MM1S")) %>%
+  cbind(ATAC_patients_numbers) %>%
+  mutate(across(1:4, ~ .x/total_number)) %>% #normalising for the initial number of ATAC peaks in each patient
+  select(-total_number) %>%
+  as.matrix()
+
+patients_enhancers_z_scaled <- all_data_matrix %>%
+  filter(row_number() <= 16) %>%
+  select(EJM_formerge.txt, H929_formerge.txt, KMS12_formerge.txt, MM1S_formerge.txt) %>%
+  set_names(c("EJM", "H929", "KMS12", "MM1S")) %>%
+  scale(center = TRUE, scale = TRUE)
+
+rownames(patients_enhancers_normalised) <- c("CCND1_A19.2", "MMSET_A19.8", "MMSET_A28.13", "CCND1_26.8", "MMSET_26.10B", "MAF_A26.12", "MAF_A26.11", "MMSET_A27.19", "CCND1_A28.15", "CCND1_A26.14", "ND_A26.19", "ND_A27.22", "ND_A28c.14", "ND_A27.21", "ND_A26.20", "ND_A26.18")
+rownames(patients_enhancers_patient_normalised) <- c("CCND1_A19.2", "MMSET_A19.8", "MMSET_A28.13", "CCND1_26.8", "MMSET_26.10B", "MAF_A26.12", "MAF_A26.11", "MMSET_A27.19", "CCND1_A28.15", "CCND1_A26.14", "ND_A26.19", "ND_A27.22", "ND_A28c.14", "ND_A27.21", "ND_A26.20", "ND_A26.18")
+rownames(patients_enhancers_enhancer_normalised) <- c("CCND1_A19.2", "MMSET_A19.8", "MMSET_A28.13", "CCND1_26.8", "MMSET_26.10B", "MAF_A26.12", "MAF_A26.11", "MMSET_A27.19", "CCND1_A28.15", "CCND1_A26.14", "ND_A26.19", "ND_A27.22", "ND_A28c.14", "ND_A27.21", "ND_A26.20", "ND_A26.18")
+rownames(patients_enhancers_z_scaled) <- c("CCND1_A19.2", "MMSET_A19.8", "MMSET_A28.13", "CCND1_26.8", "MMSET_26.10B", "MAF_A26.12", "MAF_A26.11", "MMSET_A27.19", "CCND1_A28.15", "CCND1_A26.14", "ND_A26.19", "ND_A27.22", "ND_A28c.14", "ND_A27.21", "ND_A26.20", "ND_A26.18")
+
+
+pdf(file = "heatmap_normalised.pdf", height = 6, width = 7)
+heatmap_normalised <- heatmap(patients_enhancers_normalised, scale = "none")
+dev.off()
+
+pdf(file = "heatmap_normalised_patients.pdf", height = 6, width = 7)
+heatmap_normalised <- heatmap(patients_enhancers_patient_normalised, scale = "none")
+dev.off()
+
+pdf(file = "heatmap_normalised_enhancers.pdf", height = 6, width = 7)
+heatmap_normalised <- heatmap(patients_enhancers_enhancer_normalised, scale = "none")
+dev.off()
+
+pdf(file = "heatmap_normalised_z_score.pdf", height = 6, width = 7)
+heatmap_normalised <- heatmap(patients_enhancers_z_scaled, scale = "none")
+dev.off()
+```
+
+```{r}
+#Reading in the gene expression data 
+RNAseq_data <- read_excel("~/MM_thesis_repo/general_data/RNAseq_salmon_TPM_all_files_overview_NC.xlsx") 
+RNAseq_data <- RNAseq_data %>%
+  dplyr::slice(c(12:n())) %>%
+  select(1, 17:26, 39:44) %>%
+set_names(c("Geneid", "CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7"))
+
+#making a histogram to see the data distribution 
+
+sample_names <- c("CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7")
+
+for (x in sample_names) {
+  RNAseq_data <- RNAseq_data %>%
+    mutate(!!x := as.numeric(!!sym(x)))
+}
+
+
+RNAseq_melted <- RNAseq_data %>%
+  melt(variable.name = "subject", value.name = "gene_expression", measure.vars = c("CCND1_A28.15", "CCND1_A19.2", "CCND1_26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7"))
+
+RNAseq_melted$gene_expression <- as.numeric(RNAseq_melted$gene_expression)
+histogram <- RNAseq_melted %>%
+  filter(gene_expression > 1) %>%
+  ggplot(aes(x=log2(gene_expression))) +
+  geom_histogram()
+
+RNAseq_data <- RNAseq_data %>%
+  filter(rowSums(across(2:17) > 1) >0)
+
+RNAseq_data_cor <- RNAseq_data %>%
+  select(-Geneid) %>%
+  as.matrix()
+RNAseq_data_cor <- cor(RNAseq_data_cor) 
+
+pdf(file = "heatmap_patient_expression_correlation.pdf", height = 8, width = 8)
+heatmap_correlation <- heatmap(RNAseq_data_cor, scale = "none", margins = c(7,7))
+dev.off()
+
+#heatmap of gene expression correlation based on the genes which are only expressed by unique enhancers 
+CCND1_genes <- read_tsv("~/MM_thesis_repo/A23_CCND1_genelist_unique__enhancer_associated.txt")
+MAF_genes <- read_tsv("~/MM_thesis_repo/A23_MAF_unique_genes_enhancer_associated.txt")
+MMSET_genes <- read_tsv("~/MM_thesis_repo/A23_MMSET_genelist_unique_enhancer_associated.txt")
+
+RNAseq_unique_genes <- RNAseq_data %>%
+  filter(Geneid %in% CCND1_genes$Geneid | Geneid %in% MAF_genes$Geneid | Geneid %in% MMSET_genes$Geneid) %>%
+  mutate(unique_enhancer = case_when(
+    Geneid %in% CCND1_genes$Geneid ~ "CCND1", 
+    Geneid %in% MAF_genes$Geneid ~ "MAF", 
+    Geneid %in% MMSET_genes$Geneid ~ "MMSET"
+  )) 
+
+RNAseq_unique_genes_cor <- RNAseq_unique_genes %>%
+  select(-Geneid, -unique_enhancer) %>%
+  as.matrix()
+RNAseq_unique_genes_cor <-  cor(RNAseq_unique_genes_cor)
+
+pdf(file = "heatmap_patient_expression_correlation_unique_genes.pdf", height = 8, width = 8)
+heatmap_unique_genes <- heatmap(RNAseq_unique_genes_cor, scale = "none")
+dev.off()
+```
+

@@ -1,0 +1,469 @@
+This script analises the enhancers between different cell lines. It looks at the strength based on acetylation of unique and common enhancers. It gives an overview on the gene expression of genes associated with enhancers in different cell lines, creating box plots for gene expression and a bar chart that shows the proportion of genes uniquely associated with cell line specific enhancer or common enhancers. 
+
+```{r}
+#Loading the libraries and functions
+source("~/MM-thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Reading in the data
+H929 <- read_tsv("~/MM_thesis_repo/new_data/H929_enhancer_list_v2.txt") 
+MM1S <- read_tsv("~/MM_thesis_repo/new_data/MM1S_enhancer_list_v2.txt") 
+KMS12 <- read_tsv("~/MM_thesis_repo/new_data/KMS12_enhancer_list_v2.txt")
+EJM <- read_tsv("~/MM_thesis_repo/new_data/EJM_enhancer_list_v2.txt") 
+TTseq_data <- read_tsv("~/MM_thesis_repo/general_data/T1_TTseq_rpkm.txt")
+expressed_genes <- read_tsv("~/MM_thesis_repo/general_data/hg38_refseq_genelist.txt", col_names = TRUE)
+```
+
+
+
+```{r}
+#Creating a list of chromosomes to later filter out the odd chromosomes annotated by Homer. 
+chr_list <- c(paste0("chr", seq(from=1, to=22)), "chrX", "chrY")
+```
+
+```{r}
+#Setting up a list for promoter coordinates which should be excluded from the enhancer list 
+gene_list_promoters <- expressed_genes %>%
+  filter(chrom %in% chr_list) %>%
+  select(c(chrom, strand, txStart, txEnd, name2)) %>%
+  mutate(txStart = ifelse(strand == "-", txEnd, txStart)) %>%
+  select(c(chrom, txStart, name2)) %>%
+  unique() %>%
+  set_names("chr", "start", "Geneid") %>%
+  mutate(end = start +1) %>%
+  select(3,1,2,4) %>%
+  mutate(promoter.start = start - 2000) %>%
+  mutate(promoter.end = start + 2000)
+
+promoters_coordinates <- gene_list_promoters %>%
+  select(Geneid, chr, promoter.start, promoter.end) %>%
+  set_names(c("Promoter", "chr", "start", "end"))
+```
+
+```{r}
+#Reading in the data for venn diagram and merged data for all enhancers. Reading in the merged data which was annotated with tag directories for acetylation in each cell line. 
+venn_data <- read_tsv("enhancers_combined/enhancers_merged_venn.txt")
+
+merged_data <- read_tsv("enhancers_combined/enhancers_merged.txt") %>%
+  #rename(`#name (cmd = mergePeaks EJM_formerge.txt H929_formerge.txt KMS12_formerge.txt MM1S_formerge.txt -venn enhancers_merged_venn.txt)` = "PeakID") %>%
+  #select(-Stat) %>%
+  mutate(common = ifelse(
+    (!is.na(EJM_formerge.txt) & !is.na(H929_formerge.txt) & !is.na(KMS12_formerge.txt) & !is.na(MM1S_formerge.txt)), "yes", "no" 
+  )) %>%
+  mutate(unique = case_when(
+    (is.na(EJM_formerge.txt) & is.na(H929_formerge.txt) & is.na(KMS12_formerge.txt)) ~ "MM1S", 
+    (is.na(H929_formerge.txt) & is.na(KMS12_formerge.txt) & is.na(MM1S_formerge.txt)) ~ "EJM", 
+    (is.na(EJM_formerge.txt) & is.na(KMS12_formerge.txt) & is.na(MM1S_formerge.txt)) ~ "H929", 
+    (is.na(EJM_formerge.txt) & is.na(H929_formerge.txt) & is.na(MM1S_formerge.txt)) ~ "KMS12", 
+    .default = "not unique"
+  ))
+
+acetylation_annotated <- read_tsv("enhancers_combined/enhancers_merged_acetylation_tag.txt") %>% 
+  select(c(1:4, 20:23)) %>%
+  set_names("PeakID", "Chr", "Start", "End", "MM1S_tag", "H929_tag", "EJM_tag", "KMS12_tag")
+
+merged_combined <- merged_data %>%
+  left_join(acetylation_annotated, by = "PeakID") %>%
+  select(c(-Chr, -Start, -End)) %>%
+  mutate(enhancer_type = case_when(
+    unique != "not unique" ~ unique,
+    common == "yes" ~ "common", 
+    .default = "other peak"
+  )) %>%
+  mutate(
+    across(MM1S_tag:KMS12_tag, ~ .x / (end - start) * 1000)
+  ) 
+
+exlcuding_pomoters <- 
+  setdiff(GRanges(merged_combined), GRanges(promoters_coordinates), ignore.strand = TRUE) %>%
+  as.data.frame() %>%
+  mutate(EnhancerID = paste0("EnhancerID", row.names(.))) %>% 
+  filter(width > 250) %>%
+  select(6,1:3) %>%
+  set_names(c("EnhancerID", "chr", "start", "end"))
+  
+overlap <- findOverlaps(query=GRanges(merged_combined), subject=GRanges(exlcuding_pomoters)) %>%
+         as.data.frame()
+
+merged_combined <- merged_combined1 %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap, by="queryHits") %>%
+  left_join(exlcuding_pomoters %>%
+              mutate(subjectHits = as.numeric(row.names(.))) %>%
+              select(c("EnhancerID", "subjectHits")), 
+            by = "subjectHits", multiple = "any") %>%
+    select(-subjectHits, -queryHits) %>%
+  filter(!is.na(EnhancerID))
+
+merged_combined_melted <- merged_combined %>%
+  melt(id.vars = c("enhancer_type"),
+       variable.name = "cell line", value.name = "tag", 
+       measure.vars = c("MM1S_tag", "H929_tag", "KMS12_tag", "EJM_tag"))
+
+forvenn <- merged_combined %>%
+  group_by(`Parent files`) %>%
+  summarise(n = n())
+```
+
+```{r}
+#Making a box plot that shows  the acetylation at enhancer peaks in unique and common enhancers for all cell lines. 
+boxplot <- merged_combined_melted %>%
+  ggplot(aes(x = `cell line`, y = log2(tag), fill = enhancer_type)) +
+  geom_boxplot(
+    outlier.colour="black",
+    outlier.alpha =0.3,
+    outlier.size=1,
+  ) +
+    scale_fill_manual(
+    values=c(wes_palette(4, name="Royal1"), wes_palette(2, name="Royal2")),
+    labels = c("common", "EJM", "H929", "KMS12", "MM1S", "other")) +
+      labs(
+    x = "cell line",
+    y = expression(paste("log"[2], "(number of reads)")), 
+    fill = "enhancer type") +
+  scale_x_discrete(labels=c('MM1S', 'H929', 'KMS12', "EJM")) +
+  main_theme()
+boxplot
+```
+
+```{r}
+#Producing a reciprocal box plot which was the acetylation at enhancers.
+boxplot2 <- merged_combined_melted %>%
+  ggplot(aes(x = `enhancer_type`, y = log2(tag), fill = `cell line`)) +
+  geom_boxplot(
+    outlier.colour="black",
+    outlier.alpha =0.3,
+    outlier.size=1,
+  ) +
+  scale_fill_manual(
+    values=c(wes_palette(4, name="Royal1"),
+    scale_fill_discrete(labels=c('MM1S', 'H929', 'KMS12', "EJM"))         
+    )) +
+  labs(
+    x = "enhancer type",
+    y = expression(paste("log"[2], "(number of reads)")), 
+    fill = "cell line") +
+  main_theme()
+boxplot2
+```
+
+
+```{r}
+#Venn diagram showing overlap between enhancers in different cell lines 
+venn <- euler(c(
+  "MM1S" = 10828, 
+  "KMS12" = 1550, 
+  "KMS12&MM1S" = 804, 
+  "H929" = 1930, 
+  "H929&MM1S" = 2508,
+  "H929&KMS12" = 199, 
+  "H929&MM1S&KMS12" = 715, 
+  "EJM" = 2292, 
+  "EJM&MM1S" = 1582, 
+  "EJM&KMS12" = 340, 
+  "EJM&KMS12&MM1S" = 788, 
+  "EJM&H929" = 324, 
+  "EJM&H929&MM1S" = 1423,
+  "EJM&H929&KMS12" = 213, 
+  "EJM&H929&KMS12&MM1S" = 2564
+))
+venn_plot <- plot(venn, 
+    quantities = TRUE
+     )
+
+```
+
+```{r}
+#Setting up the list of expressed genes from genelist 
+TTseq_data <- TTseq_data %>%
+  filter(EJM > 1 | MM1S > 1 | H929 > 1 | KMS12 > 1)
+
+expressed_genes <- expressed_genes %>%
+  select(c(chrom, txStart, name2)) %>%
+  set_names("chr", "start", "Geneid") %>%
+  unique() %>%
+  mutate(end = start +1) %>%
+  select(3,1,2,4) %>%
+  filter(Geneid %in% TTseq_data$Geneid) 
+
+nearest_expressed_gene <- nearest(GRanges(merged_combined), GRanges(expressed_genes)) %>%
+  as.data.frame() %>%
+  set_names("gene_index") %>%
+  cbind(merged_combined) %>%
+  left_join(expressed_genes %>%
+              mutate(gene_index = as.integer(row.names(.))) %>%
+              select(c(-chr, -end)) %>%
+              set_names(c("Geneid", "nearest_TSS", "gene_index")),
+              by="gene_index"
+            ) %>%
+  select(-gene_index) %>%
+  mutate(TSS_distance = ifelse(
+  abs(start - nearest_TSS) < abs(end - nearest_TSS), start - nearest_TSS, end - nearest_TSS
+  )) %>%
+  left_join(TTseq_data, by = "Geneid")
+```
+
+
+```{r}
+melted_gene_expression <- nearest_expressed_gene %>%
+    melt(id.vars = c("enhancer_type", "Geneid"),
+       variable.name = "cell line", value.name = "gene_expression", 
+       measure.vars = c("MM1S", "H929", "KMS12", "EJM")) %>%
+  unique()
+```
+
+
+```{r}
+#gene expression data to include also genes not associated with enhancers
+all_genes_expression <- TTseq_data %>%
+  left_join(nearest_expressed_gene %>% select(Geneid, enhancer_type)) %>%
+  mutate(enhancer_type = ifelse(is.na(enhancer_type), "no enhancer", enhancer_type)) %>%
+  select(-length)
+
+all_genes_melted <- all_genes_expression %>%
+      melt(id.vars = c("enhancer_type", "Geneid"),
+       variable.name = "cell line", value.name = "gene_expression", 
+       measure.vars = c("MM1S", "H929", "KMS12", "EJM")) %>%
+  unique()
+```
+
+```{r}
+chosen_genes <- TTseq_data %>%
+  filter(Geneid == "MBNL1" | Geneid == "PRDM1" | Geneid == "XBP1") %>%
+  unique() 
+
+chosen_genes_melted <- chosen_genes %>%
+  melt(id.vars = "Geneid", variable.name = "cell_line", value.name = "gene_expression", measure.vars = c("EJM", "H929", "KMS12", "MM1S")) 
+
+#graph to illustrate gene expression
+
+chosen_genes_plot <- chosen_genes_melted %>%
+  group_by(cell_line, Geneid) %>%
+  summarise(gene_mean = mean(gene_expression), gene_sd = sd(gene_expression)) %>%
+  ggplot(aes(x = factor(cell_line), y = gene_mean)) +
+  geom_bar(stat="identity") +
+  facet_grid(.~Geneid) +
+  labs(x = "Cell line", y = "Gene expression")+
+  main_theme()
+
+MBNL1_plot <- chosen_genes_melted %>%
+  filter(Geneid == "MBNL1") %>% 
+  ggplot(aes(x = factor(cell_line), y = gene_expression)) +
+  geom_bar(stat="identity") +
+  labs(x = "Cell line", y = "Gene expression")+
+   main_theme()
+```
+
+
+```{r}
+#Producing a box plot that shows gene expression for genes associated with common and unique enhancers.
+boxplot3 <- melted_gene_expression %>%
+  ggplot(aes(x = `enhancer_type`, y = log2(gene_expression), fill = `cell line`)) +
+  geom_boxplot(
+    outlier.colour="black",
+    outlier.alpha =0.3,
+    outlier.size=1,
+  ) +
+  scale_fill_manual(
+    values=c(wes_palette(4, name="Chevalier1"),
+    scale_fill_discrete(labels=c('MM1S', 'H929', 'KMS12', "EJM"))         
+    )) +
+  labs(
+    x = "enhancer type",
+    y = expression(paste("log"[2], "(gene expression)")), 
+    fill = "cell line") +
+  main_theme()
+boxplot3
+```
+
+```{r}
+#Producing a reciprocal boxplot of the previous one, showing gene expression for genes associated with common and unique enhancers.
+boxplot4 <- melted_gene_expression %>%
+  filter(enhancer_type != "other peak") %>%
+  ggplot(aes(x = `cell line`, y = log2(gene_expression), fill = `enhancer_type`)) +
+  geom_boxplot(
+    outlier.colour="black",
+    outlier.alpha =0.3,
+    outlier.size=1,
+  ) +
+  scale_fill_manual(
+    values=c("lightskyblue2", "goldenrod2", "olivedrab", "darkorange2", "thistle3", "burlywood2")) +
+  labs(
+    x = "cell line",
+    y = expression(paste("log"[2], "(gene expression)")), 
+    fill = "enhancer type") +
+  main_theme()
+boxplot4
+```
+
+```{r}
+#Creating a list of genes with indication whether the gene is associated with an enhancer in a specific cell line. 
+gene_enhancer_list <- nearest_expressed_gene %>%
+  select(c(Geneid, enhancer_type)) %>%
+  mutate(
+    EJM_unique = ifelse(
+    enhancer_type == "EJM", TRUE, FALSE
+      ),
+    MM1S_unique = ifelse(
+      enhancer_type == "MM1S", TRUE, FALSE
+      ),
+    H929_unique = ifelse(
+      enhancer_type == "H929", TRUE, FALSE
+      ),
+    KMS12_unique = ifelse(
+      enhancer_type == "KMS12", TRUE, FALSE
+     ),
+    other_enhancers = ifelse(
+      enhancer_type == "other peak", TRUE, FALSE
+     ),
+    common = ifelse(
+      enhancer_type == "common", TRUE, FALSE
+    )
+    ) %>%
+  select(-enhancer_type) %>%
+  unique() 
+
+gene_enhancer_list_summary <- gene_enhancer_list %>%
+  group_by(Geneid) %>%
+  summarise(EJM_unique = any(EJM_unique), 
+            MM1S_unique = any(MM1S_unique), 
+            H929_unique = any(H929_unique), 
+            KMS12_unique = any(KMS12_unique),
+            common = any(common), 
+            other_enhancers = any(other_enhancers))
+```
+
+```{r}
+#Creating sublists for each cell line with genes that are only associated with the unique enhancer in each cell line. Binding the sublists together and calculating the number of genes for each cell line. Producing a boxplot of the proportion of genes associated only with unique or common enhancers. 
+MM1S_unique <- gene_enhancer_list_summary %>%
+  filter(MM1S_unique == "TRUE", H929_unique == "FALSE", EJM_unique == "FALSE", KMS12_unique == "FALSE", other_enhancers == "FALSE", common == "FALSE")%>%
+  select(Geneid, MM1S_unique) %>%
+  mutate(cell_line = "MM1S") %>%
+  select(-MM1S_unique)
+H929_unique <- gene_enhancer_list_summary %>%
+  filter(MM1S_unique == "FALSE", H929_unique == "TRUE", EJM_unique == "FALSE", KMS12_unique == "FALSE", other_enhancers == "FALSE", common == "FALSE") %>%
+  select(Geneid, H929_unique) %>%
+  mutate(cell_line = "H929") %>%
+  select(-H929_unique)
+EJM_unique <- gene_enhancer_list_summary %>%
+  filter(MM1S_unique == "FALSE", H929_unique == "FALSE", EJM_unique == "TRUE", KMS12_unique == "FALSE", other_enhancers == "FALSE", common == "FALSE") %>%
+  select(Geneid, EJM_unique) %>%
+  mutate(cell_line = "EJM") %>%
+  select(-EJM_unique)
+KMS12_unique <- gene_enhancer_list_summary %>%
+  filter(MM1S_unique == "FALSE", H929_unique == "FALSE", EJM_unique == "FALSE", KMS12_unique == "TRUE", other_enhancers == "FALSE", common == "FALSE") %>%
+  select(Geneid, KMS12_unique) %>%
+  mutate(cell_line = "KMS12") %>%
+  select(-KMS12_unique)
+common <- gene_enhancer_list_summary %>%
+  filter(MM1S_unique == "FALSE", H929_unique == "FALSE", EJM_unique == "FALSE", KMS12_unique == "FALSE", other_enhancers == "FALSE", common == "TRUE") %>%
+  select(Geneid, common) %>%
+  mutate(cell_line = "all") %>%
+  select(-common)
+
+genes_summarised <- bind_rows(MM1S_unique, H929_unique, KMS12_unique, EJM_unique, common)
+
+other <- gene_enhancer_list_summary %>%
+  filter(!(Geneid %in% genes_summarised$Geneid)) %>%
+  select(Geneid) %>%
+  mutate(cell_line = "other")
+
+gene_list_tosave <- bind_rows(MM1S_unique, H929_unique, KMS12_unique, EJM_unique, common, other) 
+
+genes_summarised <- bind_rows(MM1S_unique, H929_unique, KMS12_unique, EJM_unique, common) %>%
+  group_by(cell_line) %>%
+  summarise(n = n()) 
+
+total_count <- gene_enhancer_list_summary %>%
+  set_names(c("Geneid","EJM", "MM1S", "H929", "KMS12", "all", "other")) %>%
+  mutate(across(where(~is.logical(.)), ~+as.logical(.x))) %>%
+  select(-Geneid) %>%
+  colSums() %>%
+  as.data.frame() %>%
+  rownames_to_column("cell_line")  %>%
+  set_names(c("cell_line", "count")) %>%
+  filter(cell_line != "other") %>%
+  left_join(genes_summarised, by = "cell_line") %>%
+  mutate(proportion = n / count)
+
+  
+barchart <- total_count %>%
+  ggplot(aes(x = cell_line, y = proportion, fill = cell_line)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(
+    values= c("lightskyblue2", "goldenrod2", "olivedrab", "darkorange2", "thistle3")) +
+  labs(
+    x = "Cell line",
+    y = "Porpotion of genes", 
+    fill = "Cell line") +
+  main_theme()
+  
+barchart
+```
+
+
+```{r}
+#making a Venn diagram for the genes associated with enhancers in different cell lines. Consider the number of groups as some may be lost. 
+gene_enhancer_list_venn <- gene_enhancer_list_summary %>%
+  group_by(EJM_unique, MM1S_unique, KMS12_unique, H929_unique, common, other_enhancers) %>%
+  summarise(n = n()) 
+
+gene_enhancer_matrix <- gene_enhancer_list_summary %>%
+  select(-Geneid) %>%
+  as.matrix()
+
+genes_venn <- euler(gene_enhancer_matrix) 
+  plot(genes_venn,
+       quantities = TRUE)
+```
+
+```{r}
+#Making a list of genes associated with unique enhancers and their gene expression. Producing a boxplot showing gene expression of genes associated with cell line specific enhancers.
+unique_genes <- gene_enhancer_list_summary %>%
+  select(-common, -other_enhancers) %>%
+  mutate(cell_line = case_when(
+    MM1S_unique == "TRUE" ~ "MM1S",
+    H929_unique == "TRUE" ~ "H929",
+    KMS12_unique == "TRUE" ~ "KMS12", 
+    EJM_unique == "TRUE" ~ "EJM"
+  )) %>%
+  filter(!is.na(cell_line)) %>%
+  select(Geneid, cell_line) %>%
+  left_join(TTseq_data, by = "Geneid") %>%
+  select(-length)
+
+melted_unique_genes <- unique_genes %>%
+    melt(id.vars = c("cell_line", "Geneid"),
+       variable.name = "cell_line_expression", value.name = "gene_expression", 
+       measure.vars = c("MM1S", "H929", "KMS12", "EJM"))
+
+boxplot5 <- melted_unique_genes %>%
+  ggplot(aes(x = cell_line, y = log2(gene_expression), fill = `cell_line_expression`)) +
+  geom_boxplot() +
+  scale_fill_manual(
+    values= c("lightskyblue2", "goldenrod2", "olivedrab", "darkorange2", "thistle3")) +
+  labs(
+    x = "Cell line specific enhancers",
+    y = expression(paste("log"[2], "(gene expression)")), 
+    fill = "Cell line gene expression") +
+  main_theme()
+  
+boxplot5
+
+boxplot6 <- melted_unique_genes %>%
+  ggplot(aes(x = cell_line_expression, y = log2(gene_expression), fill = `cell_line`)) +
+  geom_boxplot() +
+  scale_fill_manual(
+    values= c("lightskyblue2", "goldenrod2", "olivedrab", "darkorange2")) +
+  labs(
+    x = "Cell line specific enhancers",
+    y = expression(paste("log"[2], "(gene expression)")), 
+    fill = "Cell line gene expression") +
+  main_theme()
+  
+boxplot6
+```
+

@@ -1,0 +1,54 @@
+This script produces simple expression plots for a gene of interest - in this case PRDM1
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Reading in the data 
+RNAseq_data <- read_excel("~/MM_thesis_repo/general_data/RNAseq_salmon_TPM_all_files_overview_NC.xlsx")
+
+RNAseq <- RNAseq_data %>%
+  dplyr::slice(c(12:n())) %>%
+    select(1, 17:26, 39:44, 48:50, 52:54) %>%
+  set_names(c("Geneid", "CCND1_A28.15", "CCND1_A19.2", "CCND1_A26.8", "CCND1_A26.14", "MMSET_A28.13", "MMSET_A26.10B", "MMSET_A27.19", "MMSET_A19.8", "MAF_A26.11", "MAF_A26.12", "ND_A26.18", "ND_A26.19", "ND_A27.21", "ND_A27.22", "ND_A28.c15", "ND_A28c.7", "JJN3", "RPMI", "KMS12", "U266", "MM1S", "H929")) 
+
+cell_lines <- RNAseq %>%
+  select(1, 18:23) %>%
+  filter(Geneid == "PRDM1") %>%
+  select(-Geneid) %>%
+  t() %>%
+  as.data.frame() %>%
+  set_names("Expression") %>%
+  rownames_to_column("Cell line")
+
+barchart_cells <- cell_lines %>%
+  ggplot(aes(x = `Cell line`, y = as.numeric(Expression))) +
+  geom_bar(stat = "identity") +
+  main_theme()
+  
+
+patients <- RNAseq %>%
+  filter(Geneid == "PRDM1") %>%
+  select(2:17) %>%
+  t() %>%
+  as.data.frame() %>%
+  set_names("Expression") %>%
+  rownames_to_column("Patient") %>%
+  mutate(patient_type = str_split_i(Patient, "_", 1))
+
+mean_values <- patients %>%
+  group_by(patient_type) %>%
+  summarise(mean = mean(as.numeric(Expression)))
+
+barchart_patients <- mean_values %>%
+  ggplot(aes(x = patient_type, y = mean)) +
+  geom_bar(stat = "identity") +
+  geom_point(data = patients, aes(x = patient_type, y = as.numeric(Expression))) +
+  main_theme()
+
+```
+

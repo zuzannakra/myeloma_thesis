@@ -1,0 +1,206 @@
+This script removes promoter sequences from enhancers list. This addresses a bug in the initial enhancer calling pipeline where a mistake was made while defining TSS. Updated enhancers list are made. 
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Setting the list of chromosomes 
+chr_list <- c(paste0("chr", seq(from=1, to=22)), "chrX", "chrY")
+
+
+#Reading the data from EdgeR for information whether a gene is upregulated or downregulated
+MM_ND_RNA_cpm <- read_tsv("~/MM_thesis_repo/patient_data/MA_14_MM_ND_RNA_cpm.txt") %>%
+  mutate(expression_change = case_when(
+    FDR < 0.05 & logFC > 0.6 ~ "downregulated", 
+    FDR < 0.05 & logFC < -0.6 ~ "upregulated", 
+    .default = "no change"
+  )) 
+
+#Dataset that contains overlap with enhancers and all patients 
+all_patients_overlap <- read_tsv("~/MM_thesis_repo/patient_data/overlap_all.txt") %>%
+select(1:20)
+
+#Reading the reference genome list that contain coordinates of each gene 
+gene_list <- read_tsv("~/MM_thesis_repo/general_data/hg38_refseq_genelist.txt", col_names = TRUE)
+
+#Setting up the list of promoters from the reference genome list 
+gene_list_promoters2 <- gene_list %>%
+  select(c(chrom, strand, txStart, txEnd, name2)) %>%
+  mutate(txStart = ifelse(strand == "-", txEnd, txStart)) %>%
+  select(c(chrom, txStart, name2)) %>%
+  unique() %>%
+  set_names("chr", "start", "Geneid") %>%
+  mutate(end = start +1) %>%
+  select(3,1,2,4) %>%
+  mutate(promoter.start = start - 2000) %>%
+  mutate(promoter.end = start + 2000)
+
+
+promoters_coordinates <- gene_list_promoters2 %>%
+  filter(chr %in% chr_list) %>%
+  select(Geneid, chr, promoter.start, promoter.end) %>%
+  set_names(c("Geneid", "chr", "start", "end")) %>%
+  select(c(2:4, 1)) %>%
+  write_tsv("promoter_coordinates.txt", col_names = F)
+
+#Reading in the old enhancer data frame 
+enhancers <- read_tsv("~/MM_thesis_repo/previous_analysis/enhancers_data/MA_14_all_enhancers_data.txt")
+
+#Finding overlaps between enhancers and promoters
+overlap_enhancers_promoters <- findOverlaps(query = GRanges(enhancers), subject = GRanges(promoters_coordinates)) %>%
+  as.data.frame()
+
+#Making a data frame that shows the overlap between enhancers and promoters 
+enhancers_promoters <- enhancers %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_enhancers_promoters, by="queryHits") %>%
+  left_join(promoters_coordinates %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".enhancers", ".promoters")) %>%
+    select(-queryHits, -subjectHits) %>%
+  mutate(promoter_overlap = ifelse(is.na(Geneid.promoters), "no overlap", "overlap with promoter")) %>%
+  unique()
+
+#Summarising to show the numbers of enhancers that overlap   
+enhancers_promoters_summar <- enhancers_promoters %>%
+  select(1:28, 33) %>%
+  unique() %>%
+  group_by(promoter_overlap) %>%
+  summarise(n = n())
+```
+
+
+```{r}
+#Setting up the enhancers to exclude promoter sequences 
+new_enhancers <- setdiff(GRanges(enhancers), GRanges(promoters_coordinates), ignore.strand = TRUE) %>%
+  as.data.frame() %>%
+  mutate(EnhancerID = paste0("EnhancerID", row.names(.))) %>%
+  filter(width > 250)
+
+overlap_old_new <- findOverlaps(query = GRanges(new_enhancers), subject = GRanges(enhancers)) %>%
+  as.data.frame()
+
+enhancers_list <- new_enhancers %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_old_new, by = "queryHits") %>%
+  full_join(enhancers %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".new", ".old")) %>%
+  select(-queryHits, -subjectHits) %>%
+  select(1:3, 6,11:34) %>%
+  rename(seqnames = "chr", start.new = "start", end.new = "end", EnhancerID.new = "EnhancerID") %>%
+  select(4, 1:3, 5:28)
+
+all_enhancers <- read_tsv("~/MM_thesis_repo/previous_analysis/enhancers_data/enhancers_merged.txt")
+
+overlap_old_new2 <- findOverlaps(query = GRanges(new_enhancers), subject = GRanges(all_enhancers)) %>%
+  as.data.frame()
+
+#the most recent version (checked on 26.05)
+all_enhancers_updated <- new_enhancers %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_old_new2, by = "queryHits") %>%
+  full_join(all_enhancers %>%
+              mutate(subjectHits = as.numeric(row.names(.))),
+            by = "subjectHits", suffix = c(".new", ".old")) %>%
+  select(-queryHits, -subjectHits) %>%
+  filter(!is.na(EnhancerID)) %>%
+  select(-chr, -start.old, -end.old, -PeakID) %>%
+  rename(seqnames = "chr", start.new = "start", end.new = "end") %>%
+  select(6, 1:5, 7:13) %>%
+  filter(chr %in% chr_list)
+
+#Updating the list of KMS12 enhancers 
+
+KMS12_enhancers <- read_tsv("~/MM_thesis_repo/previous_analysis/enhancers_data/Enhancers_list_KMS12.txt") %>%
+  dplyr::rename(chr = chr.enhancer, start = start.enhancer, end = end.enhancer) %>%
+  filter(!is.na(chr)) %>%
+  unique()
+
+KMS12_difference <- setdiff(GRanges(KMS12_enhancers), GRanges(promoters_coordinates), ignore.strand = TRUE) %>%
+  as.data.frame() %>%
+  mutate(EnhancerID = paste0("EnhancerID", row.names(.))) %>%
+  filter(width > 250)
+
+overlap_KMS12 <- findOverlaps(query = GRanges(KMS12_difference), subject = GRanges(KMS12_enhancers)) %>%
+  as.data.frame()
+
+KMS12_new_enhancers <- KMS12_difference %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_KMS12, by = "queryHits") %>%
+  full_join(KMS12_enhancers %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".new", ".old")) %>%
+  select(-queryHits, -subjectHits) %>%
+  filter(!is.na(EnhancerID)) %>%
+  select(-PeakID.enhancer, -start.old, -end.old, -chr) %>%
+  select(6, 1:3, 6:14) %>%
+    rename(seqnames = "chr", start.new = "start", end.new = "end")
+
+write_tsv(KMS12_new_enhancers, "~/MM_thesis_repo/enhancers_combined/Enhancers_list_KMS12_updated.txt")
+
+#Updating the list of H929 enhancers 
+
+H929_enhancers <- read_tsv("~/MM_thesis_repo/previous_analysis/enhancers_data/Enhancers_list_H929.txt") %>%
+  dplyr::rename(chr = chr.enhancer, start = start.enhancer, end = end.enhancer) %>%
+  filter(!is.na(chr)) %>%
+  unique()
+
+H929_difference <- setdiff(GRanges(H929_enhancers), GRanges(promoters_coordinates), ignore.strand = TRUE) %>%
+  as.data.frame() %>%
+  mutate(EnhancerID = paste0("EnhancerID", row.names(.))) %>%
+  filter(width > 250)
+
+overlap_H929 <- findOverlaps(query = GRanges(H929_difference), subject = GRanges(H929_enhancers)) %>%
+  as.data.frame()
+
+H929_new_enhancers <- H929_difference %>%
+  mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_H929, by = "queryHits") %>%
+  full_join(H929_enhancers %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits", suffix = c(".new", ".old")) %>%
+  select(-queryHits, -subjectHits) %>%
+  filter(!is.na(EnhancerID)) %>%
+  select(-PeakID.enhancer, -start.old, -end.old, -chr) %>%
+  select(6, 1:3, 6:14) %>%
+    rename(seqnames = "chr", start.new = "start", end.new = "end")
+
+write_tsv(H929_new_enhancers, "~/MM_thesis_repo/enhancers_combined/Enhancers_list_H929_updated.txt")
+```
+
+```{r}
+#joining the list of enhancers with patient tag and with the information for each enhancer (cell line)
+
+enhancers_joined_data <- enhancers_list %>%
+  left_join(all_enhancers_updated)
+
+#most recent list (26.05) taken for EdgeR analysis 
+enhancers_final_list <- all_enhancers_updated %>%
+  left_join(enhancers_list) %>%
+  select(1:4, 14:36) %>%
+  write_tsv("~/MM_thesis_repo/general_data/MA16_Enhancers_final_final.txt")
+
+
+#Final list of enhancers, same as above but with the information where the enhancer originates from 
+overlap_enhancers_patients <- findOverlaps(query = GRanges(all_enhancers_updated), subject = GRanges(all_patients_overlap)) %>%
+  as.data.frame()
+
+enhancers_origins <- all_enhancers_updated %>%
+  select(1, 10:13) %>%
+    mutate(queryHits = as.numeric(row.names(.))) %>%
+  full_join(overlap_enhancers_patients, by="queryHits") %>%
+  left_join(all_patients_overlap %>% 
+              select(5, 10:20) %>%
+              mutate(subjectHits = as.numeric(row.names(.))), 
+            by = "subjectHits") %>%
+  select(-subjectHits, -queryHits) %>%
+  rename(EJM_formerge.txt = "EJM", H929_formerge.txt = "H929", KMS12_formerge.txt = "KMS12", MM1S_formerge.txt = "MM1S") %>%
+  mutate(across(2:17, ~ if_else(is.na(.), 0, 1))) %>%
+  write_tsv("~/MM_thesis_repo/general_data/MA_16_all_enhancers_all_patients_origin.txt")
+```
+

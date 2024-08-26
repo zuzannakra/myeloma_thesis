@@ -1,0 +1,65 @@
+This script performs data visualisation of motif analysis run with Homer
+
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+
+```{r}
+#Read in the data
+motif_results <- read_tsv("~/MM_thesis_repo/motif_analysis/knownResults.txt") %>%
+  mutate(motif_name = str_split_i(`Motif Name`, "/", 1))
+```
+
+```{r}
+motifs <- motif_results %>%
+  select(motif_name, `Log P-value`, `% of Target Sequences with Motif`, `% of Background Sequences with Motif`) %>%
+  mutate(percentage_sequences_with_motif = as.numeric(gsub("%", "", `% of Target Sequences with Motif`))) %>%
+  mutate(percentage_background = as.numeric(gsub("%", "", `% of Background Sequences with Motif`))) %>%
+  select(-`% of Target Sequences with Motif`, -`% of Background Sequences with Motif`) 
+
+ranked_motifs <- motifs %>%
+  mutate(percentage_normalised = percentage_sequences_with_motif/percentage_background) %>%
+  mutate(rank = factor(rank(percentage_normalised, ties.method = "random"))) %>%
+  arrange(desc(percentage_normalised))
+
+
+motifs_of_interest <- c("CTCF(Zf)", "IRF4(IRF)", "Oct4(POU,Homeobox)", "ISRE(IRF)", "IRF2(IRF)", "BORIS(Zf)", "IRF1(IRF)", "PRDM1(Zf)")
+ranked_subset <- ranked_motifs %>%
+  filter(motif_name %in%  motifs_of_interest)
+
+ranked_plot <- ranked_motifs %>%
+  ggplot(aes(x =as.numeric(rank), y = percentage_normalised)) +
+  geom_point() +
+  main_theme() +
+  geom_text_repel(data=ranked_subset, aes(label = motif_name, color = motif_name),
+                  box.padding = 0.5, max.overlaps = Inf) +
+  geom_point(data = ranked_subset, aes(color = motif_name))
+```
+
+
+```{r}
+motifs_melted <- motifs %>%
+  melt(id.vars = c("motif_name", "Log P-value"), variable.name = "comparison", value.name = "enrichment")  %>%
+  mutate(comparison = factor(comparison, levels = c("percentage_background", "percentage_sequences_with_motif"))) 
+
+motif_graph <- motifs_melted %>%
+  filter(motif_name %in% motifs_of_interest) %>%
+  ggplot(aes(x = enrichment, y = reorder(motif_name, +enrichment), color = comparison, fill = -`Log P-value`)) +
+  geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_continuous(limits = c(0, 3400), low = "yellow", high = "red") +
+  scale_color_manual(values = c("percentage_background" = "black", "percentage_sequences_with_motif" = "black")) +
+  main_theme()
+
+hm.palette <- colorRampPalette(rev(brewer.pal(11,"YlOrRd")), space = "Lab")
+motif_graph_2 <- ranked_motifs %>%
+  filter(motif_name %in% motifs_of_interest) %>%
+  ggplot(aes(x = (percentage_normalised), y = motif_name, fill = -`Log P-value`)) +
+  geom_bar(stat = "identity") +
+  scale_fill_continuous(limits = c(0, 3400), low = "yellow", high = "red") +
+  main_theme() 
+
+```
+

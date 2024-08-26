@@ -1,0 +1,49 @@
+This script creates data visualisation from DepMap data
+```{r}
+#Loading necessary libraries and functions
+source("~/MM_thesis_repo/libraries_thesis.R")
+source("~/MM_thesis_repo/functions_MM.R")
+```
+
+```{r}
+#Read in the data
+depmap_data <- read_csv("~/MM_thesis_repo/PRDM1/PRDM1 CRISPR (DepMap Public 24Q2+Score Chronos).csv")
+MM_table <- read_excel("~/MM_thesis_repo/general_data/Myeloma_Cell_Line_Characteristics.xlsx") 
+
+#Set a data frame for translocations of interest
+translocations <- data.frame(
+  translocation = c("t(14;16)", "t(4;14)", "t(11;14)"),
+  patient_subtype = c("MAF", "MMSET", "CCND1")
+)
+
+#Filter table of cell line characteristics
+MM_table_2 <- MM_table %>%
+  select(1, 11) %>%
+  set_names("Cell Line Name", "translocation") %>%
+  filter(!is.na(translocation)) %>%
+  left_join(translocations) %>%
+  filter(!is.na(patient_subtype))
+
+data_summary <- depmap_data %>%
+  group_by(`Lineage`) %>%
+  summarise(n = n()) %>%
+  filter(n > 40)
+```
+
+```{r}
+#Create a plot using DepMap data
+labels <- depmap_data %>%
+  filter(`Cell Line Name` == "MM1S" | `Cell Line Name` == "SKMM2" | `Cell Line Name` == "RPMI8226" | `Cell Line Name` == "JJN3")
+
+forest_plot <- depmap_data %>%
+  filter(Lineage %in% data_summary$Lineage) %>%
+  ggplot(aes(x = `CRISPR (DepMap Public 24Q2+Score, Chronos)`, y = `Lineage`)) +
+  geom_vline(xintercept = 0) +
+  scale_x_continuous(limits = c(-1.3, 0.8)) +
+  geom_boxplot() +
+  geom_point(data = labels, aes(x = `CRISPR (DepMap Public 24Q2+Score, Chronos)`, y = `Lineage`, color = Lineage)) +
+  main_theme() +
+  geom_text_repel(data=labels, aes(label = `Cell Line Name`),
+                  box.padding = 0.5, max.overlaps = Inf)
+```
+
